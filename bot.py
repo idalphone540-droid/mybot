@@ -22,6 +22,7 @@ ADMIN_ID = 5346581925
 # بيانات شام كاش المعتمدة
 SHAM_NAME = "سكينه حمود طه"
 SHAM_CODE = "be03739e320f3dfd318a1a7faebae16a"
+QR_IMAGE_NAME = "IMG-20260923-WA0003.jpg"
 
 GROUPS = {
     "ichancy": -1004416182163,
@@ -90,8 +91,8 @@ async def send_payment_instructions(message: types.Message, amount: int):
         f"💰 **المبلغ المطلوب تحويله:** **{amount:,} ل.س**\n\n"
         f"📸 يرجى إتمام التحويل ثم إرسال **صورة إشعار الدفع** هنا:"
     )
-    if os.path.exists("qr.jpg"):
-        photo = FSInputFile("qr.jpg")
+    if os.path.exists(QR_IMAGE_NAME):
+        photo = FSInputFile(QR_IMAGE_NAME)
         await message.answer_photo(photo=photo, caption=caption, parse_mode=ParseMode.MARKDOWN)
     else:
         await message.answer(caption, parse_mode=ParseMode.MARKDOWN)
@@ -611,8 +612,8 @@ async def admin_send_price(message: types.Message, state: FSMContext):
         "لإتمام الطلب، يرجى التحويل إلى حساب شام كاش الموضح أعلاه ثم إرسال الإشعار."
     )
     try:
-        if os.path.exists("qr.jpg"):
-            photo = FSInputFile("qr.jpg")
+        if os.path.exists(QR_IMAGE_NAME):
+            photo = FSInputFile(QR_IMAGE_NAME)
             await bot.send_photo(user_id, photo=photo, caption=caption, parse_mode=ParseMode.MARKDOWN)
         else:
             await bot.send_message(user_id, caption, parse_mode=ParseMode.MARKDOWN)
