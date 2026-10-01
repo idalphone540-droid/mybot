@@ -9,6 +9,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
     FSInputFile
 )
 
@@ -22,7 +24,7 @@ CHANNEL_LINK = "https://t.me/SyriaStore_ch"
 GROUPS = {
     "balance": -1003745247353,
     "games": -1004426615112,
-    "accounts": -1003985654158,
+    "accounts": -1003985654158,  # تأكد من مطابقة آيدي مجموعة الحسابات ورفع البوت مشرفاً
     "social": -1004411774893,
     "support": -1004420804667
 }
@@ -34,6 +36,14 @@ QR_IMAGE_PATH = "qr_sham.jpg"
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+
+# زر ثابت دائم تحت خانة الكتابة
+def persistent_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📋 القائمة الرئيسية")]],
+        resize_keyboard=True,
+        persistent=True
+    )
 
 # ----------------- فحص الاشتراك الإجباري -----------------
 async def is_subscribed(user_id: int) -> bool:
@@ -81,12 +91,12 @@ GOVERNORATES = [
     "إدلب", "جبلة", "القلمون"
 ]
 
-# قائمة الحسابات الـ 27 الجاهزة للاختيار بالأزرار
+# قائمة الحسابات الـ 27 الجاهزة المعروضة بالكامل بالأزرار
 ACCOUNTS_LIST = [
-    "Shahid VIP (شاهد VIP)", "Watch It", "OSN+", "TOD TV", "Disney+", "Amazon Prime Video",
+    "Shahid VIP", "Watch It", "OSN+", "TOD TV", "Disney+", "Amazon Prime Video",
     "Apple TV+", "IPTV سنة", "IPTV 6 أشهر", "Spotify Premium", "YouTube Premium",
-    "Anghami Plus", "SoundCloud Pro", "Deezer Premium", "Canva Pro (سنة)",
-    "Canva Pro (شهر)", "Adobe Creative Cloud", "TradingView Pro", "Duolingo Plus",
+    "Anghami Plus", "SoundCloud Pro", "Deezer Premium", "Canva Pro سنة",
+    "Canva Pro شهر", "Adobe Cloud", "TradingView Pro", "Duolingo Plus",
     "LinkedIn Premium", "Telegram Premium", "NordVPN", "ExpressVPN", "Surfshark VPN",
     "Crunchyroll Fan", "Mega Cloud", "Google One"
 ]
@@ -135,8 +145,10 @@ def main_menu():
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
+@dp.message(F.text == "📋 القائمة الرئيسية")
 @dp.message(CommandStart())
-async def start_cmd(message: types.Message):
+async def start_cmd(message: types.Message, state: FSMContext):
+    await state.clear()
     if not await is_subscribed(message.from_user.id):
         await message.answer(
             "⚠️ عذراً عزيزي، يجب عليك الاشتراك في قناة البوت الرسمية أولاً لتتمكن من استخدام الخدمات:\n\n"
@@ -144,13 +156,21 @@ async def start_cmd(message: types.Message):
             reply_markup=sub_check_keyboard()
         )
         return
-    await message.answer("👋 أهلاً بك في نظام الخدمات المتكامل.\nاختر القسم المطلوب من القائمة أدناه:", reply_markup=main_menu())
+    await message.answer(
+        "👋 أهلاً بك في نظام الخدمات المتكامل.\nاختر القسم المطلوب من القائمة أدناه:",
+        reply_markup=main_menu()
+    )
+    # إرفاق الزر الثابت أسفل الشاشة
+    await message.answer("استخدم الزر الثابت بالأسفل للعودة دائماً.", reply_markup=persistent_keyboard())
 
 @dp.callback_query(F.data == "check_subscription")
 async def check_sub_cb(cb: types.CallbackQuery):
     if await is_subscribed(cb.from_user.id):
         await cb.message.delete()
-        await cb.message.answer("✅ شكراً لاشتراكك! يمكنك الآن استخدام البوت بحرية:\n\nاختر القسم المطلوب:", reply_markup=main_menu())
+        await cb.message.answer(
+            "✅ شكراً لاشتراكك! يمكنك الآن استخدام البوت بحرية:\n\nاختر القسم المطلوب:",
+            reply_markup=main_menu()
+        )
     else:
         await cb.answer("❌ لم تقم بالاشتراك في القناة بعد! اشترك ثم اضغط تأكيد.", show_alert=True)
 
@@ -365,7 +385,7 @@ async def proc_syr_inv_amt(message: types.Message, state: FSMContext):
         await state.update_data(target=f"فاتورة سيريتل: {data.get('inv_num')} | القيمة: {amt}", price=final_price)
         await prompt_payment(message, state)
     except Exception:
-        await message.reply("⚠️️ أدخل قيمة صحيحة بالأرقام:")
+        await message.reply("⚠️ أدخل قيمة صحيحة بالأرقام:")
 
 @dp.message(OrderState.mtn_invoice_num)
 async def proc_mtn_inv_num(message: types.Message, state: FSMContext):
@@ -389,7 +409,7 @@ async def proc_syr_cash_amt(message: types.Message, state: FSMContext):
     try:
         amt = float(message.text.strip())
         if amt < 1000:
-            await message.reply("⚠️️ أقل كمية مقبولة هي 1,000 ل.س:")
+            await message.reply("⚠️ أقل كمية مقبولة هي 1,000 ل.س:")
             return
         final_price = round(amt * 1.05, 2)
         await state.update_data(price=final_price, amount=amt)
@@ -520,7 +540,7 @@ async def proc_chat_calc(message: types.Message, state: FSMContext):
         await message.reply("⚠️ تنسيق غير صحيح! أرسل الآيدي ثم الكمية وبينهما مسافة.")
 
 # ====================================================================
-# [4] قسم الحسابات والاشتراكات (قائمة الـ 27 حساباً كاملة بالأزرار)
+# [4] قسم الحسابات والاشتراكات (الـ 27 حساباً كاملة بالأزرار والصفحات)
 # ====================================================================
 @dp.callback_query(F.data == "sec_accounts")
 async def accounts_menu(cb: types.CallbackQuery):
@@ -566,12 +586,16 @@ async def account_select_duration(cb: types.CallbackQuery, state: FSMContext):
     await state.update_data(selected_acc_name=acc_name)
 
     kb = [
-        [InlineKeyboardButton(text="⏳ اشتراك شهر", callback_data=f"acc_dur:شهر")],
-        [InlineKeyboardButton(text="⏳ اشتراك 3 أشهر", callback_data=f"acc_dur:3 أشهر")],
-        [InlineKeyboardButton(text="⏳ اشتراك سنة", callback_data=f"acc_dur:سنة")],
+        [InlineKeyboardButton(text="⏳ اشتراك شهر", callback_data="acc_dur:شهر")],
+        [InlineKeyboardButton(text="⏳ اشتراك 3 أشهر", callback_data="acc_dur:3 أشهر")],
+        [InlineKeyboardButton(text="⏳ اشتراك سنة", callback_data="acc_dur:سنة")],
         [InlineKeyboardButton(text="🔙 رجوع للقائمة", callback_data="acc_page:0")]
     ]
-    await cb.message.edit_text(f"لقد اخترت: **{acc_name}**\n\nاختر المدة المطلوبة بالضغط على الزر:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
+    await cb.message.edit_text(
+        f"لقد اخترت: **{acc_name}**\n\nاختر المدة المطلوبة بالضغط على الزر أدناه:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+        parse_mode="Markdown"
+    )
 
 @dp.callback_query(F.data.startswith("acc_dur:"))
 async def account_duration_finish(cb: types.CallbackQuery, state: FSMContext):
@@ -582,20 +606,23 @@ async def account_duration_finish(cb: types.CallbackQuery, state: FSMContext):
     group_id = GROUPS["accounts"]
     user_info = f"@{cb.from_user.username}" if cb.from_user.username else "بدون يوزر"
     text_to_group = (
-        f"📩 **طلب حساب جديد:**\n"
+        f"📩 **طلب حساب جاهز:**\n"
         f"👤 الزبون: {user_info} (`{cb.from_user.id}`)\n"
         f"🏷 الحساب: **{acc_name}**\n"
         f"⏳ المدة: **{dur}**\n\n"
-        f"💡 لتسعير الطلب، قم بالرد المباشر (Reply) على هذه الرسالة لتحديد السعر للزبون."
+        f"💡 لتسعير الطلب والرد على الزبون، قم بعمل رد (Reply) مباشر على هذه الرسالة."
     )
-    await bot.send_message(group_id, text_to_group, parse_mode="Markdown")
-    await cb.message.edit_text(
-        f"✅ تم إرسال طلبك لحساب **{acc_name}** ({dur}) إلى الإدارة بنجاح.\n"
-        f"سيتم الرد عليك هنا بالتفاصيل والسعر قريباً جداً.\n\n"
-        f"يمكنك متابعة تصفح الخدمات من القائمة أدناه:",
-        reply_markup=main_menu(),
-        parse_mode="Markdown"
-    )
+    try:
+        await bot.send_message(group_id, text_to_group, parse_mode="Markdown")
+        await cb.message.edit_text(
+            f"✅ تم إرسال طلبك لحساب **{acc_name}** ({dur}) للإدارة بنجاح.\n"
+            f"سيتم الرد عليك هنا بالتفاصيل والسعر قريباً جداً.\n\n"
+            f"يمكنك اختيار خدمة أخرى من القائمة أدناه:",
+            reply_markup=main_menu(),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await cb.answer(f"تعذر الإرسال: تأكد من آيدي مجموعة الحسابات وأن البوت مشرف فيها!", show_alert=True)
 
 @dp.callback_query(F.data.startswith("acc:"))
 async def acc_confirm(cb: types.CallbackQuery, state: FSMContext):
@@ -878,7 +905,7 @@ async def deliver_link(message: types.Message, state: FSMContext):
         await message.reply("✅ تم إرسال الرابط للزبون بنجاح.")
         await state.clear()
     except Exception as e:
-        await message.reply(f"⚠️️ فشل الإرسال: {e}")
+        await message.reply(f"⚠️ فشل الإرسال: {e}")
 
 @dp.callback_query(F.data == "sec_support")
 async def support_start(cb: types.CallbackQuery, state: FSMContext):
