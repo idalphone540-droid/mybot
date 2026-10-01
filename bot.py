@@ -12,8 +12,13 @@ from aiogram.types import (
     FSInputFile
 )
 
+# ----------------- الإعدادات والمجموعات -----------------
 BOT_TOKEN = "8774564171:AAHqohfEpmorX9GLG32TXrZsnXoRNDu6ePs"
 ADMIN_ID = 123456789
+
+# بيانات القناة المعتمدة للاشتراك الإجباري
+CHANNEL_ID = -1004492385043
+CHANNEL_LINK = "https://t.me/SyriaStore_ch"
 
 GROUPS = {
     "balance": -1003745247353,
@@ -31,6 +36,23 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# ----------------- فحص الاشتراك الإجباري -----------------
+async def is_subscribed(user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        return member.status not in ["left", "kicked"]
+    except Exception as e:
+        logging.error(f"خطأ في فحص الاشتراك: {e}")
+        return True
+
+def sub_check_keyboard():
+    kb = [
+        [InlineKeyboardButton(text="📢 اشترك في القناة أولاً", url=CHANNEL_LINK)],
+        [InlineKeyboardButton(text="🔄 تم الاشتراك (تأكيد)", callback_data="check_subscription")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+# ----------------- قاعدة البيانات -----------------
 conn = sqlite3.connect("bot_system.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""
@@ -89,6 +111,9 @@ class OrderState(StatesGroup):
     support_ticket = State()
     admin_sending_link = State()
 
+class QuoteState(StatesGroup):
+    entering_quote_text = State()
+
 def main_menu():
     kb = [
         [InlineKeyboardButton(text="📞 قسم الرصيد والكاش", callback_data="sec_balance")],
@@ -103,7 +128,22 @@ def main_menu():
 
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
+    if not await is_subscribed(message.from_user.id):
+        await message.answer(
+            "⚠️ عذراً عزيزي، يجب عليك الاشتراك في قناة البوت الرسمية أولاً لتتمكن من استخدام الخدمات:\n\n"
+            "اضغط على الزر بالأسفل للاشتراك، ثم اضغط على زر (تم الاشتراك).",
+            reply_markup=sub_check_keyboard()
+        )
+        return
     await message.answer("👋 أهلاً بك في نظام الخدمات المتكامل.\nاختر القسم المطلوب من القائمة أدناه:", reply_markup=main_menu())
+
+@dp.callback_query(F.data == "check_subscription")
+async def check_sub_cb(cb: types.CallbackQuery):
+    if await is_subscribed(cb.from_user.id):
+        await cb.message.delete()
+        await cb.message.answer("✅ شكراً لاشتراكك! يمكنك الآن استخدام البوت بحرية:\n\nاختر القسم المطلوب:", reply_markup=main_menu())
+    else:
+        await cb.answer("❌ لم تقم بالاشتراك في القناة بعد! اشترك ثم اضغط تأكيد.", show_alert=True)
 
 @dp.message(Command("rate"))
 async def set_dollar(message: types.Message):
@@ -113,7 +153,7 @@ async def set_dollar(message: types.Message):
         update_setting("dollar_rate", val)
         await message.reply(f"✅ تم تحديث سعر صرف الدولار: {val} ل.س")
     except Exception:
-        await message.reply("⚠️ الاستخدام: `/rate 150`")
+        await message.reply("⚠️️ الاستخدام: `/rate 150`")
 
 @dp.message(Command("set_num"))
 async def set_num(message: types.Message):
@@ -130,6 +170,9 @@ async def back_to_main(cb: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await cb.message.edit_text("اختر القسم المطلوب أدناه:", reply_markup=main_menu())
 
+# ====================================================================
+# [1] قسم الرصيد والكاش الكامل
+# ====================================================================
 SYR_UNITS = [
     (9.61, 12), (20.19, 25), (30.76, 40), (40.38, 50), (52.88, 65),
     (62.50, 75), (77.88, 95), (81.73, 100), (100.96, 125), (125, 150),
@@ -372,6 +415,9 @@ async def proc_mtn_cash_num(message: types.Message, state: FSMContext):
     await state.update_data(target=f"رقم كاش MTN: {message.text.strip()} | الكمية: {data.get('amount')}")
     await prompt_payment(message, state)
 
+# ====================================================================
+# [2] قسم شحن الألعاب
+# ====================================================================
 GAME_PACKS = {
     "pubg": [("60 UC", 1.0), ("325 UC", 5.0), ("660 UC", 10.0), ("1800 UC", 25.0), ("3850 UC", 50.0), ("8100 UC", 100.0)],
     "ff": [("100 جوهرة", 1.0), ("210 جوهرة", 2.0), ("530 جوهرة", 5.0), ("1080 جوهرة", 10.0), ("2200 جوهرة", 20.0), ("5600 جوهرة", 50.0)],
@@ -417,6 +463,9 @@ async def proc_game_data(message: types.Message, state: FSMContext):
     await state.update_data(target=f"آيدي اللعبة: {message.text.strip()}")
     await prompt_payment(message, state)
 
+# ====================================================================
+# [3] قسم تطبيقات الشات
+# ====================================================================
 @dp.callback_query(F.data == "sec_chat")
 async def chat_menu(cb: types.CallbackQuery):
     kb = [
@@ -461,6 +510,9 @@ async def proc_chat_calc(message: types.Message, state: FSMContext):
     except Exception:
         await message.reply("⚠️ تنسيق غير صحيح! أرسل الآيدي ثم الكمية وبينهما مسافة.")
 
+# ====================================================================
+# [4] قسم الحسابات الجاهزة
+# ====================================================================
 @dp.callback_query(F.data == "sec_accounts")
 async def accounts_menu(cb: types.CallbackQuery):
     kb = [
@@ -480,6 +532,9 @@ async def acc_confirm(cb: types.CallbackQuery, state: FSMContext):
     await state.update_data(sec="accounts", service=f"حساب {name}", price=float(price), target="حساب رسمي مع الضمان")
     await prompt_payment_cb(cb, state)
 
+# ====================================================================
+# [5] قسم السوشيال ميديا والإعلانات والأرقام
+# ====================================================================
 @dp.callback_query(F.data == "sec_social")
 async def social_menu(cb: types.CallbackQuery):
     kb = [
@@ -506,7 +561,7 @@ async def fb_menu(cb: types.CallbackQuery):
 async def ig_menu(cb: types.CallbackQuery):
     kb = [
         [InlineKeyboardButton(text="👁 مشاهدات 500k (300 ل.س)", callback_data="sbuy:ig:مشاهدات 500k:300")],
-        [InlineKeyboardButton(text="❤️ لايكات 5k (700 ل.س)", callback_data="sbuy:ig:لايكات 5k:700")],
+        [InlineKeyboardButton(text="❤️️ لايكات 5k (700 ل.س)", callback_data="sbuy:ig:لايكات 5k:700")],
         [InlineKeyboardButton(text="👥 متابعين أجنبي 1k (700 ل.س)", callback_data="sbuy:ig:متابعين أجنبي 1k:700")],
         [InlineKeyboardButton(text="👥 متابعين عربي 1k (1,350 ل.س)", callback_data="sbuy:ig:متابعين عربي 1k:1350")],
         [InlineKeyboardButton(text="🔙 رجوع", callback_data="sec_social")]
@@ -600,28 +655,47 @@ async def buy_num_fast(cb: types.CallbackQuery, state: FSMContext):
     await state.update_data(sec="social", service=f"رقم {name}", price=price, target="رابط تفعيل")
     await prompt_payment_cb(cb, state)
 
+# --- طلبات التسعير التفاعلية ---
 @dp.callback_query(F.data.startswith("quote:"))
-async def generic_quote(cb: types.CallbackQuery):
+async def generic_quote_start(cb: types.CallbackQuery, state: FSMContext):
     q_type = cb.data.split(":")[1]
     g_map = {
-        "game": ("games", "لعبة إضافية"),
-        "chat": ("games", "تطبيق شات"),
-        "account": ("accounts", "حساب جاهز"),
-        "num_tiktok": ("social", "رقم تيك توك"),
-        "num_google": ("social", "تفعيل غوغل"),
-        "num_apple": ("social", "تفعيل آبل")
+        "game": ("games", "🎮 طلب تسعير لعبة"),
+        "chat": ("games", "💬 طلب تسعير تطبيق شات"),
+        "account": ("accounts", "📦 طلب تسعير حساب"),
+        "num_tiktok": ("social", "📱 طلب رقم تيك توك"),
+        "num_google": ("social", "🌐 طلب تفعيل غوغل"),
+        "num_apple": ("social", "🍎 طلب تفعيل آبل")
     }
     sec, label = g_map.get(q_type, ("games", "طلب عام"))
-    group_id = GROUPS[sec]
-    text = (
-        f"📩 **طلب تسعير جديد:**\n"
-        f"👤 الزبون: @{cb.from_user.username or 'بدون'} (`{cb.from_user.id}`)\n"
-        f"🏷 التصنيف: **{label}**\n\n"
-        f"يرجى الرد على هذه الرسالة أو التواصل مع الزبون لتحديد السعر."
+    await state.update_data(q_sec=sec, q_label=label)
+    await state.set_state(QuoteState.entering_quote_text)
+    await cb.message.answer(
+        f"✍️ يرجى كتابة تفاصيل طلبك الآن بالتفصيل:\n"
+        f"(اسم الخدمة أو اللعبة + الآيدي + الكمية أو الباقة المطلوبة):"
     )
-    await bot.send_message(group_id, text, parse_mode="Markdown")
-    await cb.answer("✅ تم إرسال طلبك للإدارة، سيتم الرد عليك قريباً.", show_alert=True)
+    await cb.answer()
 
+@dp.message(QuoteState.entering_quote_text)
+async def generic_quote_receive(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    sec = data.get("q_sec", "games")
+    label = data.get("q_label", "طلب تسعير")
+    group_id = GROUPS.get(sec, GROUPS["games"])
+
+    user_info = f"@{message.from_user.username}" if message.from_user.username else "بدون يوزر"
+    text_to_group = (
+        f"📩 **{label}:**\n"
+        f"👤 الزبون: {user_info} (`{message.from_user.id}`)\n"
+        f"📝 **التفاصيل:**\n{message.text}\n\n"
+        f"💡 لتسعير الطلب، قم بالرد المباشر (Reply) على هذه الرسالة واكتب السعر أو التفاصيل للزبون."
+    )
+    
+    await bot.send_message(group_id, text_to_group, parse_mode="Markdown")
+    await state.clear()
+    await message.answer("✅ تم استلام طلبك وإرساله للإدارة بنجاح. سيتم مراجعته والرد عليك هنا قريباً بالسعر.")
+
+# --- آلية الدفع المشتركة ---
 async def prompt_payment(message: types.Message, state: FSMContext):
     data = await state.get_data()
     price = data.get("price", 0)
