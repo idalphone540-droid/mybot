@@ -12,7 +12,7 @@ from aiogram.types import (
     FSInputFile
 )
 
-BOT_TOKEN = "8774564171:AAFxpEXjd6BVSCMwYhE5Eg_7ZxiIN1yhHmI"
+BOT_TOKEN = "8774564171:AAHqohfEpmorX9GLG32TXrZsnXoRNDu6ePs"
 ADMIN_ID = 123456789
 
 GROUPS = {
