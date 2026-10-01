@@ -1,21 +1,3 @@
-File "/home/runner/work/mybot/mybot/bot.py", line 471
-    ][span_23](start_span)[span_23](end_span)
-NameError: name 'span_23' is not defined
-```[span_2](start_span)[span_2](end_span)
-
-أنت ما زلت تشغّل النسخة القديمة من ملف `bot.py` التي تحتوي على وسوم نصية تالفة مثل `[span_23]` و `[span_20]` و `[span_21]` دخلت أثناء النسخ القديم وتسببت في توقف الكود[span_3](start_span)[span_3](end_span).
-
----
-
-### طريقة الحل خطوة بخطوة:
-
-1. ادخل إلى تبويب **Code** في أعلى المستودع.
-2. اضغط على ملف **`bot.py`**.
-3. اضغط على أيقونة **القلم (Edit this file)**.
-4. امسح كل السطور الموجودة في الملف حتى يصبح فارغاً تماماً.
-5. انسخ الكود التالي النظيف والمعدل بالكامل والصقه:
-
-```python
 import asyncio
 import logging
 import sqlite3
@@ -71,22 +53,41 @@ def update_setting(key: str, val: float):
     cursor.execute("UPDATE settings SET val=? WHERE key=?", (val, key))
     conn.commit()
 
+GOVERNORATES = [
+    "دمشق", "ريف دمشق", "حمص", "ريف حمص", "حماة", "ريف حماة",
+    "طرطوس", "درعا", "اللاذقية", "ريف اللاذقية", "حلب", "القامشلي",
+    "الرقة", "دير الزور", "البوكمال", "الحسكة", "السويداء", "القنيطرة",
+    "إدلب", "جبلة", "القلمون"
+]
+
 class OrderState(StatesGroup):
-    entering_phone_syr = State()
-    entering_phone_mtn = State()
-    entering_station_syr = State()
-    entering_station_mtn = State()
-    entering_invoice = State()
-    entering_cash_amount = State()
-    entering_cash_target = State()
+    syr_units_phone = State()
+    syr_station_code = State()
+    syr_station_gov = State()
+    syr_invoice_num = State()
+    syr_invoice_amt = State()
+    syr_cash_amt = State()
+    syr_cash_id = State()
+
+    mtn_units_phone = State()
+    mtn_station_code = State()
+    mtn_station_num = State()
+    mtn_station_gov = State()
+    mtn_invoice_num = State()
+    mtn_invoice_amt = State()
+    mtn_cash_amt = State()
+    mtn_cash_num = State()
+
     entering_game_data = State()
-    entering_quote_details = State()
-    entering_social_target = State()
+    entering_chat_qty = State()
+
+    entering_social_link = State()
     entering_ad_phone = State()
     entering_custom_ad_days = State()
+
     waiting_receipt = State()
-    admin_sending_link = State()
     support_ticket = State()
+    admin_sending_link = State()
 
 def main_menu():
     kb = [
@@ -102,7 +103,7 @@ def main_menu():
 
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
-    await message.answer("👋 أهلاً بك في بوت الخدمات المتكامل.\nاختر القسم المطلوب من القائمة أدناه:", reply_markup=main_menu())
+    await message.answer("👋 أهلاً بك في نظام الخدمات المتكامل.\nاختر القسم المطلوب من القائمة أدناه:", reply_markup=main_menu())
 
 @dp.message(Command("rate"))
 async def set_dollar(message: types.Message):
@@ -195,14 +196,22 @@ async def handle_bopt(cb: types.CallbackQuery, state: FSMContext):
         await cb.message.edit_text(f"اختر فئة كازية {net_name}:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
     elif opt == "invoice":
-        await state.update_data(sec="balance", service=f"فواتير {net_name}")
-        await state.set_state(OrderState.entering_invoice)
-        await cb.message.edit_text(f"أدخل رقم فاتورة {net_name} وقيمتها مفصولين بمسافة:\nمثال: `09XXXXXXXX 15000`", parse_mode="Markdown")
+        await state.update_data(sec="balance", service=f"فواتير {net_name}", net=net)
+        if net == "syr":
+            await state.set_state(OrderState.syr_invoice_num)
+            await cb.message.edit_text("أدخل رقم فاتورة Syriatel:")
+        else:
+            await state.set_state(OrderState.mtn_invoice_num)
+            await cb.message.edit_text("أدخل رقم فاتورة MTN:")
 
     elif opt == "cash":
         await state.update_data(sec="balance", service=f"كاش {net_name}", net=net)
-        await state.set_state(OrderState.entering_cash_amount)
-        await cb.message.edit_text(f"أدخل كمية كاش {net_name} المطلوبة (الحد الأدنى 1,000 ل.س):")
+        if net == "syr":
+            await state.set_state(OrderState.syr_cash_amt)
+            await cb.message.edit_text("أدخل كمية كاش Syriatel المطلوبة (أقل كمية 1,000 ل.س):")
+        else:
+            await state.set_state(OrderState.mtn_cash_amt)
+            await cb.message.edit_text("أدخل كمية كاش MTN المطلوبة (أقل كمية 1,000 ل.س):")
 
 @dp.callback_query(F.data.startswith("u_"))
 async def select_unit(cb: types.CallbackQuery, state: FSMContext):
@@ -211,83 +220,156 @@ async def select_unit(cb: types.CallbackQuery, state: FSMContext):
     u, p = items[int(idx)]
     await state.update_data(sec="balance", service=f"وحدات {net.upper()}", unit=u, price=p, net=net)
     if net == "syr":
-        await state.set_state(OrderState.entering_phone_syr)
-        await cb.message.edit_text("أدخل رقم سيريتل مؤلف من 10 خانات (مثال: 0912345678):")
+        await state.set_state(OrderState.syr_units_phone)
+        await cb.message.edit_text("أدخل رقم سيريتل المطلوب التحويل إليه (مؤلف من 10 خانات حصراً):")
     else:
-        await state.set_state(OrderState.entering_phone_mtn)
-        await cb.message.edit_text("أدخل رقم MTN مؤلف من 10 خانات (مثال: 0944123456):")
+        await state.set_state(OrderState.mtn_units_phone)
+        await cb.message.edit_text("أدخل رقم MTN المطلوب التحويل إليه (مؤلف من 10 خانات حصراً):")
 
-@dp.message(OrderState.entering_phone_syr)
-async def proc_phone_syr(message: types.Message, state: FSMContext):
+@dp.message(OrderState.syr_units_phone)
+async def proc_syr_u_phone(message: types.Message, state: FSMContext):
     p = message.text.strip()
     if not (p.isdigit() and len(p) == 10 and p.startswith("09")):
-        await message.reply("⚠️ الرقم غير صحيح! يجب أن يتكون من 10 خانات ويبدأ بـ 09:")
+        await message.reply("⚠️ رقم سيريتل يجب أن يكون مؤلفاً من 10 خانات ويبدأ بـ 09. أعد المحاولة:")
         return
-    await state.update_data(target=p)
+    await state.update_data(target=f"رقم سيريتل: {p}")
     await prompt_payment(message, state)
 
-@dp.message(OrderState.entering_phone_mtn)
-async def proc_phone_mtn(message: types.Message, state: FSMContext):
+@dp.message(OrderState.mtn_units_phone)
+async def proc_mtn_u_phone(message: types.Message, state: FSMContext):
     p = message.text.strip()
     if not (p.isdigit() and len(p) == 10 and p.startswith("09")):
-        await message.reply("⚠️ الرقم غير صحيح! يجب أن يتكون من 10 خانات ويبدأ بـ 09:")
+        await message.reply("⚠️ رقم MTN يجب أن يكون مؤلفاً من 10 خانات ويبدأ بـ 09. أعد المحاولة:")
         return
-    await state.update_data(target=p)
+    await state.update_data(target=f"رقم MTN: {p}")
     await prompt_payment(message, state)
 
 @dp.callback_query(F.data.startswith("s_"))
 async def select_station(cb: types.CallbackQuery, state: FSMContext):
     _, net, idx = cb.data.split("_")
     a, p = STATION_VALS[int(idx)]
-    await state.update_data(sec="balance", service=f"كازية {net.upper()}", amount=a, price=p)
+    await state.update_data(sec="balance", service=f"جملة كازية {net.upper()}", amount=a, price=p, net=net)
     if net == "syr":
-        await state.set_state(OrderState.entering_station_syr)
-        await cb.message.edit_text("أدخل كود الكازية (6 خانات) متبوعاً بالمحافظة:\nمثال: `123456 دمشق`", parse_mode="Markdown")
+        await state.set_state(OrderState.syr_station_code)
+        await cb.message.edit_text("أدخل كود كازية Syriatel (مؤلف من 6 خانات حصراً):")
     else:
-        await state.set_state(OrderState.entering_station_mtn)
-        await cb.message.edit_text("أدخل كود الكازية ورقم البطاقة والمحافظة:\nمثال: `123456 0944000000 حمص`", parse_mode="Markdown")
+        await state.set_state(OrderState.mtn_station_code)
+        await cb.message.edit_text("أدخل كود كازية MTN:")
 
-@dp.message(OrderState.entering_station_syr)
-async def proc_syr_st(message: types.Message, state: FSMContext):
-    await state.update_data(target=f"كازية سيريتل: {message.text.strip()}")
-    await prompt_payment(message, state)
+@dp.message(OrderState.syr_station_code)
+async def proc_syr_st_code(message: types.Message, state: FSMContext):
+    code = message.text.strip()
+    if not (code.isdigit() and len(code) == 6):
+        await message.reply("⚠️ كود كازية سيريتل يجب أن يتكون من 6 أرقام حصراً. أعد المحاولة:")
+        return
+    await state.update_data(st_code=code)
+    await state.set_state(OrderState.syr_station_gov)
+    buttons = [InlineKeyboardButton(text=g, callback_data=f"gov_syr:{g}") for g in GOVERNORATES]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    await message.answer("اختر المحافظة:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
-@dp.message(OrderState.entering_station_mtn)
-async def proc_mtn_st(message: types.Message, state: FSMContext):
-    await state.update_data(target=f"كازية MTN: {message.text.strip()}")
-    await prompt_payment(message, state)
+@dp.callback_query(F.data.startswith("gov_syr:"), OrderState.syr_station_gov)
+async def proc_syr_st_gov(cb: types.CallbackQuery, state: FSMContext):
+    gov = cb.data.split(":")[1]
+    data = await state.get_data()
+    target_info = f"كود كازية: {data.get('st_code')} | المحافظة: {gov}"
+    await state.update_data(target=target_info)
+    await prompt_payment_cb(cb, state)
 
-@dp.message(OrderState.entering_invoice)
-async def proc_invoice(message: types.Message, state: FSMContext):
+@dp.message(OrderState.mtn_station_code)
+async def proc_mtn_st_code(message: types.Message, state: FSMContext):
+    await state.update_data(st_code=message.text.strip())
+    await state.set_state(OrderState.mtn_station_num)
+    await message.answer("أدخل رقم كازية MTN (أو رقم البطاقة):")
+
+@dp.message(OrderState.mtn_station_num)
+async def proc_mtn_st_num(message: types.Message, state: FSMContext):
+    await state.update_data(st_num=message.text.strip())
+    await state.set_state(OrderState.mtn_station_gov)
+    buttons = [InlineKeyboardButton(text=g, callback_data=f"gov_mtn:{g}") for g in GOVERNORATES]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    await message.answer("اختر المحافظة:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+@dp.callback_query(F.data.startswith("gov_mtn:"), OrderState.mtn_station_gov)
+async def proc_mtn_st_gov(cb: types.CallbackQuery, state: FSMContext):
+    gov = cb.data.split(":")[1]
+    data = await state.get_data()
+    target_info = f"كود: {data.get('st_code')} | رقم: {data.get('st_num')} | المحافظة: {gov}"
+    await state.update_data(target=target_info)
+    await prompt_payment_cb(cb, state)
+
+@dp.message(OrderState.syr_invoice_num)
+async def proc_syr_inv_num(message: types.Message, state: FSMContext):
+    await state.update_data(inv_num=message.text.strip())
+    await state.set_state(OrderState.syr_invoice_amt)
+    await message.answer("أدخل قيمة الفاتورة بالليرة السورية:")
+
+@dp.message(OrderState.syr_invoice_amt)
+async def proc_syr_inv_amt(message: types.Message, state: FSMContext):
     try:
-        inv, amt = message.text.strip().split()
-        final_price = round(float(amt) * 1.05, 2)
-        await state.update_data(target=f"رقم الفاتورة: {inv} | المبلغ: {amt}", price=final_price)
+        amt = float(message.text.strip())
+        final_price = round(amt * 1.05, 2)
+        data = await state.get_data()
+        await state.update_data(target=f"فاتورة سيريتل: {data.get('inv_num')} | القيمة: {amt}", price=final_price)
         await prompt_payment(message, state)
     except Exception:
-        await message.reply("⚠️ تنسيق خاطئ! أرسل رقم الفاتورة ثم المبلغ وبينهما مسافة.")
+        await message.reply("⚠️ أدخل قيمة صحيحة بالأرقام:")
 
-@dp.message(OrderState.entering_cash_amount)
-async def proc_cash_amt(message: types.Message, state: FSMContext):
+@dp.message(OrderState.mtn_invoice_num)
+async def proc_mtn_inv_num(message: types.Message, state: FSMContext):
+    await state.update_data(inv_num=message.text.strip())
+    await state.set_state(OrderState.mtn_invoice_amt)
+    await message.answer("أدخل قيمة الفاتورة بالليرة السورية:")
+
+@dp.message(OrderState.mtn_invoice_amt)
+async def proc_mtn_inv_amt(message: types.Message, state: FSMContext):
+    try:
+        amt = float(message.text.strip())
+        final_price = round(amt * 1.05, 2)
+        data = await state.get_data()
+        await state.update_data(target=f"فاتورة MTN: {data.get('inv_num')} | القيمة: {amt}", price=final_price)
+        await prompt_payment(message, state)
+    except Exception:
+        await message.reply("⚠️ أدخل قيمة صحيحة بالأرقام:")
+
+@dp.message(OrderState.syr_cash_amt)
+async def proc_syr_cash_amt(message: types.Message, state: FSMContext):
     try:
         amt = float(message.text.strip())
         if amt < 1000:
-            await message.reply("⚠️ الحد الأدنى لكاش هو 1,000 ل.س:")
+            await message.reply("⚠️ أقل كمية مقبولة هي 1,000 ل.س:")
             return
         final_price = round(amt * 1.05, 2)
         await state.update_data(price=final_price, amount=amt)
-        data = await state.get_data()
-        await state.set_state(OrderState.entering_cash_target)
-        if data.get("net") == "syr":
-            await message.answer("أدخل معرّف Player-ID الخاص بك لاستلام كاش سيريتل:")
-        else:
-            await message.answer("أدخل رقم MTN كاش المطلوب التحويل إليه:")
+        await state.set_state(OrderState.syr_cash_id)
+        await message.answer("أدخل معرّف Player-ID الخاص بك لاستلام كاش Syriatel:")
     except Exception:
-        await message.reply("⚠️ أدخل رقماً صحيحاً بالأرقام:")
+        await message.reply("⚠️ أدخل قيمة صحيحة بالأرقام:")
 
-@dp.message(OrderState.entering_cash_target)
-async def proc_cash_tgt(message: types.Message, state: FSMContext):
-    await state.update_data(target=f"الكاش: {message.text.strip()}")
+@dp.message(OrderState.syr_cash_id)
+async def proc_syr_cash_id(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    await state.update_data(target=f"Player-ID: {message.text.strip()} | الكمية: {data.get('amount')}")
+    await prompt_payment(message, state)
+
+@dp.message(OrderState.mtn_cash_amt)
+async def proc_mtn_cash_amt(message: types.Message, state: FSMContext):
+    try:
+        amt = float(message.text.strip())
+        if amt < 1000:
+            await message.reply("⚠️ أقل كمية مقبولة هي 1,000 ل.س:")
+            return
+        final_price = round(amt * 1.05, 2)
+        await state.update_data(price=final_price, amount=amt)
+        await state.set_state(OrderState.mtn_cash_num)
+        await message.answer("أدخل رقم MTN كاش المطلوب التحويل إليه:")
+    except Exception:
+        await message.reply("⚠️ أدخل قيمة صحيحة بالأرقام:")
+
+@dp.message(OrderState.mtn_cash_num)
+async def proc_mtn_cash_num(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    await state.update_data(target=f"رقم كاش MTN: {message.text.strip()} | الكمية: {data.get('amount')}")
     await prompt_payment(message, state)
 
 GAME_PACKS = {
@@ -304,7 +386,7 @@ async def games_menu(cb: types.CallbackQuery):
         [InlineKeyboardButton(text="🔥 فري فاير (Free Fire)", callback_data="game:ff")],
         [InlineKeyboardButton(text="🃏 جواكر (Jawaker)", callback_data="game:jawaker")],
         [InlineKeyboardButton(text="⚔️ كلاش أوف كلانس (CoC)", callback_data="game:coc")],
-        [InlineKeyboardButton(text="🎮 باقي الألعاب [طلب تسعير]", callback_data="quote:game")],
+        [InlineKeyboardButton(text="🎮 باقي الألعاب (31 لعبة) [طلب تسعير]", callback_data="quote:game")],
         [InlineKeyboardButton(text="🔙 القائمة الرئيسية", callback_data="back_main")]
     ]
     await cb.message.edit_text("اختر اللعبة المطلوبة:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
@@ -338,11 +420,11 @@ async def proc_game_data(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data == "sec_chat")
 async def chat_menu(cb: types.CallbackQuery):
     kb = [
-        [InlineKeyboardButton(text="🌟 Soul Star (كوينز)", callback_data="chat:soulstar")],
-        [InlineKeyboardButton(text="❄️ Soulchill (كريستال)", callback_data="chat:soulchill")],
+        [InlineKeyboardButton(text="🌟 Soul Star (كوينز × 0.025)", callback_data="chat:soulstar")],
+        [InlineKeyboardButton(text="❄️ Soulchill (كريستال × 0.30)", callback_data="chat:soulchill")],
         [InlineKeyboardButton(text="💬 IMO (ألماس)", callback_data="chat:imo")],
-        [InlineKeyboardButton(text="🗣 Talsa chat (كوينز)", callback_data="chat:talsa")],
-        [InlineKeyboardButton(text="🔍 باقي التطبيقات [طلب تسعير]", callback_data="quote:chat")],
+        [InlineKeyboardButton(text="🗣 Talsa chat (كوينز × 0.02)", callback_data="chat:talsa")],
+        [InlineKeyboardButton(text="🔍 باقي التطبيقات (186 تطبيق) [تسعير]", callback_data="quote:chat")],
         [InlineKeyboardButton(text="🔙 القائمة الرئيسية", callback_data="back_main")]
     ]
     await cb.message.edit_text("اختر تطبيق الشات المطلوب:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
@@ -351,10 +433,10 @@ async def chat_menu(cb: types.CallbackQuery):
 async def chat_calc_prompt(cb: types.CallbackQuery, state: FSMContext):
     c_key = cb.data.split(":")[1]
     await state.update_data(sec="games", chat_app=c_key)
-    await state.set_state(OrderState.entering_quote_details)
+    await state.set_state(OrderState.entering_chat_qty)
     await cb.message.edit_text("أدخل (الآيدي) متبوعاً بـ (الكمية المطلوبة):\nمثال: `123456 5000`", parse_mode="Markdown")
 
-@dp.message(OrderState.entering_quote_details)
+@dp.message(OrderState.entering_chat_qty)
 async def proc_chat_calc(message: types.Message, state: FSMContext):
     data = await state.get_data()
     c_key = data.get("chat_app")
@@ -382,20 +464,20 @@ async def proc_chat_calc(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data == "sec_accounts")
 async def accounts_menu(cb: types.CallbackQuery):
     kb = [
-        [InlineKeyboardButton(text="🤖 ChatGPT عادي (1,700 ل.س)", callback_data="acc_buy:ChatGPT عادي:1700")],
-        [InlineKeyboardButton(text="⚡ ChatGPT Go (2,000 ل.س)", callback_data="acc_buy:ChatGPT Go:2000")],
-        [InlineKeyboardButton(text="💎 ChatGPT Plus شهر (3,500 ل.س)", callback_data="acc_buy:ChatGPT Plus شهر:3500")],
-        [InlineKeyboardButton(text="🎬 Netflix شهر (800 ل.س)", callback_data="acc_buy:Netflix شهر:800")],
-        [InlineKeyboardButton(text="🍿 Netflix سنة (5,000 ل.س)", callback_data="acc_buy:Netflix سنة:5000")],
+        [InlineKeyboardButton(text="🤖 ChatGPT عادي (1,700 ل.س - شهر)", callback_data="acc:ChatGPT عادي:1700")],
+        [InlineKeyboardButton(text="⚡ ChatGPT Go (2,000 ل.س - ضمان)", callback_data="acc:ChatGPT Go:2000")],
+        [InlineKeyboardButton(text="💎 ChatGPT Plus شهر (3,500 ل.س)", callback_data="acc:ChatGPT Plus شهر:3500")],
+        [InlineKeyboardButton(text="🎬 Netflix شهر جهاز واحد (800 ل.س)", callback_data="acc:Netflix شهر:800")],
+        [InlineKeyboardButton(text="🍿 Netflix سنة جهاز واحد (5,000 ل.س)", callback_data="acc:Netflix سنة:5000")],
         [InlineKeyboardButton(text="📋 باقي الحسابات (27 خدمة) [تسعير]", callback_data="quote:account")],
         [InlineKeyboardButton(text="🔙 القائمة الرئيسية", callback_data="back_main")]
     ]
-    await cb.message.edit_text("اختر الحساب المطلوب:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await cb.message.edit_text("اختر الحساب الجاهز المطلوب:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-@dp.callback_query(F.data.startswith("acc_buy:"))
-async def acc_buy_fixed(cb: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data.startswith("acc:"))
+async def acc_confirm(cb: types.CallbackQuery, state: FSMContext):
     _, name, price = cb.data.split(":")
-    await state.update_data(sec="accounts", service=f"حساب {name}", price=float(price), target="حساب جاهز مع الضمان")
+    await state.update_data(sec="accounts", service=f"حساب {name}", price=float(price), target="حساب رسمي مع الضمان")
     await prompt_payment_cb(cb, state)
 
 @dp.callback_query(F.data == "sec_social")
@@ -445,10 +527,10 @@ async def tg_menu(cb: types.CallbackQuery):
 async def soc_buy(cb: types.CallbackQuery, state: FSMContext):
     _, plat, name, price = cb.data.split(":")
     await state.update_data(sec="social", service=f"{plat.upper()} - {name}", price=float(price))
-    await state.set_state(OrderState.entering_social_target)
+    await state.set_state(OrderState.entering_social_link)
     await cb.message.edit_text("أرسل الآن رابط الحساب أو المنشور المطلوب:")
 
-@dp.message(OrderState.entering_social_target)
+@dp.message(OrderState.entering_social_link)
 async def proc_soc_link(message: types.Message, state: FSMContext):
     await state.update_data(target=message.text.strip())
     await prompt_payment(message, state)
@@ -462,34 +544,34 @@ AD_DAYS = [
 async def ads_menu(cb: types.CallbackQuery):
     buttons = []
     for d, p in AD_DAYS:
-        buttons.append(InlineKeyboardButton(text=f"إعلان {d} أيام ⬅ {p}ل.س", callback_data=f"ad_fixed:{d}:{p}"))
+        buttons.append(InlineKeyboardButton(text=f"إعلان {d} أيام ⬅ {p}ل.س", callback_data=f"ad_f:{d}:{p}"))
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
-    rows.append([InlineKeyboardButton(text="⚙️ تحديد أيام حسب الطلب (200 ل.س/يوم)", callback_data="ad_custom")])
+    rows.append([InlineKeyboardButton(text="⚙ مدة مخصصة (200 ل.س/يوم)", callback_data="ad_c")])
     rows.append([InlineKeyboardButton(text="🔙 رجوع", callback_data="sec_social")])
-    await cb.message.edit_text("اختر مدة الإعلان الممول على فيسبوك:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await cb.message.edit_text("اختر مدة الإعلان الممول:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
-@dp.callback_query(F.data.startswith("ad_fixed:"))
-async def ad_fixed_click(cb: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data.startswith("ad_f:"))
+async def ad_f_click(cb: types.CallbackQuery, state: FSMContext):
     _, d, p = cb.data.split(":")
     await state.update_data(sec="social", service=f"إعلان ممول ({d} أيام)", price=float(p))
     await state.set_state(OrderState.entering_ad_phone)
-    await cb.message.edit_text("يرجى كتابة رقم الهاتف للتواصل معك:")
+    await cb.message.edit_text("أدخل رقم هاتفك للتواصل وتجهيز تفاصيل الإعلان:")
 
-@dp.callback_query(F.data == "ad_custom")
-async def ad_custom_click(cb: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "ad_c")
+async def ad_c_click(cb: types.CallbackQuery, state: FSMContext):
     await state.set_state(OrderState.entering_custom_ad_days)
-    await cb.message.edit_text("أدخل عدد الأيام المطلوبة للإعلان (كل يوم = 200 ل.س):")
+    await cb.message.edit_text("أدخل عدد الأيام المطلوبة (اليوم = 200 ل.س):")
 
 @dp.message(OrderState.entering_custom_ad_days)
-async def proc_custom_ad(message: types.Message, state: FSMContext):
+async def proc_c_ad(message: types.Message, state: FSMContext):
     try:
         days = int(message.text.strip())
         price = days * 200
-        await state.update_data(sec="social", service=f"إعلان ممول مخصص ({days} أيام)", price=price)
+        await state.update_data(sec="social", service=f"إعلان مخصص ({days} أيام)", price=price)
         await state.set_state(OrderState.entering_ad_phone)
         await message.answer("أدخل رقم هاتفك للتواصل:")
     except Exception:
-        await message.reply("⚠️ يرجى إدخال عدد صحيح بالأرقام:")
+        await message.reply("⚠️ أدخل عدداً صحيحاً بالأرقام:")
 
 @dp.message(OrderState.entering_ad_phone)
 async def proc_ad_phone(message: types.Message, state: FSMContext):
@@ -501,8 +583,8 @@ async def numbers_menu(cb: types.CallbackQuery, state: FSMContext):
     p_wa = get_setting("num_whatsapp")
     p_tg = get_setting("num_telegram")
     kb = [
-        [InlineKeyboardButton(text=f"🟢 رقم واتساب أجنبي ({p_wa} ل.س)", callback_data="buy_n:whatsapp")],
-        [InlineKeyboardButton(text=f"🔵 رقم تلغرام أمريكي ({p_tg} ل.س)", callback_data="buy_n:telegram")],
+        [InlineKeyboardButton(text=f"🟢 رقم واتساب أجنبي ({p_wa} ل.س)", callback_data="buyn:whatsapp")],
+        [InlineKeyboardButton(text=f"🔵 رقم تلغرام أمريكي ({p_tg} ل.س)", callback_data="buyn:telegram")],
         [InlineKeyboardButton(text="📱 رقم تيك توك [طلب تسعير]", callback_data="quote:num_tiktok")],
         [InlineKeyboardButton(text="🌐 تفعيل غوغل [طلب تسعير]", callback_data="quote:num_google")],
         [InlineKeyboardButton(text="🍎 تفعيل آبل [طلب تسعير]", callback_data="quote:num_apple")],
@@ -510,7 +592,7 @@ async def numbers_menu(cb: types.CallbackQuery, state: FSMContext):
     ]
     await cb.message.edit_text("قسم أرقام التفعيل:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-@dp.callback_query(F.data.startswith("buy_n:"))
+@dp.callback_query(F.data.startswith("buyn:"))
 async def buy_num_fast(cb: types.CallbackQuery, state: FSMContext):
     target = cb.data.split(":")[1]
     price = get_setting(f"num_{target}")
@@ -535,11 +617,10 @@ async def generic_quote(cb: types.CallbackQuery):
         f"📩 **طلب تسعير جديد:**\n"
         f"👤 الزبون: @{cb.from_user.username or 'بدون'} (`{cb.from_user.id}`)\n"
         f"🏷 التصنيف: **{label}**\n\n"
-        f"✏️ اضغط الزر بالأسفل لتحديد السعر وإرساله للزبون:"
+        f"يرجى الرد على هذه الرسالة أو التواصل مع الزبون لتحديد السعر."
     )
-    kb = [[InlineKeyboardButton(text="💰 تسعير الطلب", callback_data=f"setquote:{cb.from_user.id}:{label}")]]
-    await bot.send_message(group_id, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
-    await cb.answer("✅ تم إرسال طلبك للإدارة، سيصلك السعر هنا قريباً.", show_alert=True)
+    await bot.send_message(group_id, text, parse_mode="Markdown")
+    await cb.answer("✅ تم إرسال طلبك للإدارة، سيتم الرد عليك قريباً.", show_alert=True)
 
 async def prompt_payment(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -598,7 +679,7 @@ async def receive_receipt(message: types.Message, state: FSMContext):
         parse_mode="Markdown"
     )
     await state.clear()
-    await message.answer("✅ تم استلام إشعار الدفع وإرساله لفريق الإدارة. سيتم إشعارك فور اكتمال التنفيذ.")
+    await message.answer("✅ تم استلام إشعار الدفع وإرساله للإدارة. سيتم إشعارك فور اكتمال التنفيذ.")
 
 @dp.callback_query(F.data.startswith("done:"))
 async def order_done(cb: types.CallbackQuery):
@@ -673,7 +754,7 @@ async def support_group_reply(message: types.Message):
             await bot.send_message(cust_id, f"💬 **رد الدعم الفني:**\n\n{message.text}")
             await message.reply("✅ تم توصيل الرد للزبون.")
         except Exception as e:
-            await message.reply(f"⚠️️ فشل الإرسال: {e}")
+            await message.reply(f"⚠️ فشل الإرسال: {e}")
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
