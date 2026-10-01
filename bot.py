@@ -1,3 +1,21 @@
+File "/home/runner/work/mybot/mybot/bot.py", line 471
+    ][span_23](start_span)[span_23](end_span)
+NameError: name 'span_23' is not defined
+```[span_2](start_span)[span_2](end_span)
+
+أنت ما زلت تشغّل النسخة القديمة من ملف `bot.py` التي تحتوي على وسوم نصية تالفة مثل `[span_23]` و `[span_20]` و `[span_21]` دخلت أثناء النسخ القديم وتسببت في توقف الكود[span_3](start_span)[span_3](end_span).
+
+---
+
+### طريقة الحل خطوة بخطوة:
+
+1. ادخل إلى تبويب **Code** في أعلى المستودع.
+2. اضغط على ملف **`bot.py`**.
+3. اضغط على أيقونة **القلم (Edit this file)**.
+4. امسح كل السطور الموجودة في الملف حتى يصبح فارغاً تماماً.
+5. انسخ الكود التالي النظيف والمعدل بالكامل والصقه:
+
+```python
 import asyncio
 import logging
 import sqlite3
@@ -12,20 +30,17 @@ from aiogram.types import (
     FSInputFile
 )
 
-# ----------------- الإعدادات العامة -----------------
 BOT_TOKEN = "8774564171:AAFxpEXjd6BVSCMwYhE5Eg_7ZxiIN1yhHmI"
-ADMIN_ID = 123456789  # ضع هنا معرفك الرقمي في تيليجرام (Telegram ID)
+ADMIN_ID = 123456789
 
-# المجموعات الإدارية المعتمدة
 GROUPS = {
-    "balance": -1003745247353,     # مجموعة الرصيد والكاش[span_0](start_span)[span_0](end_span)
-    "games": -1004426615122,       # مجموعة الألعاب وتطبيقات الشات[span_1](start_span)[span_1](end_span)
-    "accounts": -1003985654158,    # مجموعة الحسابات الجاهزة[span_2](start_span)[span_2](end_span)
-    "social": -1004411774893,      # مجموعة السوشيال ميديا والأرقام[span_3](start_span)[span_3](end_span)
-    "support": -1004420804667      # مجموعة الدعم الفني والشكاوى[span_4](start_span)[span_4](end_span)
+    "balance": -1003745247353,
+    "games": -1004426615122,
+    "accounts": -1003985654158,
+    "social": -1004411774893,
+    "support": -1004420804667
 }
 
-# بيانات الدفع عبر شام كاش
 SHAM_NAME = "سكينه حمود طه"
 SHAM_ADDR = "be03739e320f3dfd318a1a7faebae16a"
 QR_IMAGE_PATH = "qr_sham.jpg"
@@ -34,7 +49,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# ----------------- قاعدة البيانات -----------------
 conn = sqlite3.connect("bot_system.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""
@@ -57,9 +71,7 @@ def update_setting(key: str, val: float):
     cursor.execute("UPDATE settings SET val=? WHERE key=?", (val, key))
     conn.commit()
 
-# ----------------- حالات FSM -----------------
 class OrderState(StatesGroup):
-    # قسم الرصيد
     entering_phone_syr = State()
     entering_phone_mtn = State()
     entering_station_syr = State()
@@ -67,23 +79,15 @@ class OrderState(StatesGroup):
     entering_invoice = State()
     entering_cash_amount = State()
     entering_cash_target = State()
-
-    # قسم الألعاب والشات
     entering_game_data = State()
     entering_quote_details = State()
-
-    # قسم السوشيال والإعلانات
     entering_social_target = State()
     entering_ad_phone = State()
     entering_custom_ad_days = State()
-
-    # تسليم واستقبال
     waiting_receipt = State()
-    admin_quote_pricing = State()
     admin_sending_link = State()
     support_ticket = State()
 
-# ----------------- القوائم الرئيسية -----------------
 def main_menu():
     kb = [
         [InlineKeyboardButton(text="📞 قسم الرصيد والكاش", callback_data="sec_balance")],
@@ -125,9 +129,6 @@ async def back_to_main(cb: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await cb.message.edit_text("اختر القسم المطلوب أدناه:", reply_markup=main_menu())
 
-# ====================================================================
-# [1] قسم الرصيد والكاش (Syriatel & MTN)
-# ====================================================================
 SYR_UNITS = [
     (9.61, 12), (20.19, 25), (30.76, 40), (40.38, 50), (52.88, 65),
     (62.50, 75), (77.88, 95), (81.73, 100), (100.96, 125), (125, 150),
@@ -289,9 +290,6 @@ async def proc_cash_tgt(message: types.Message, state: FSMContext):
     await state.update_data(target=f"الكاش: {message.text.strip()}")
     await prompt_payment(message, state)
 
-# ====================================================================
-# [2] قسم شحن الألعاب
-# ====================================================================
 GAME_PACKS = {
     "pubg": [("60 UC", 1.0), ("325 UC", 5.0), ("660 UC", 10.0), ("1800 UC", 25.0), ("3850 UC", 50.0), ("8100 UC", 100.0)],
     "ff": [("100 جوهرة", 1.0), ("210 جوهرة", 2.0), ("530 جوهرة", 5.0), ("1080 جوهرة", 10.0), ("2200 جوهرة", 20.0), ("5600 جوهرة", 50.0)],
@@ -330,16 +328,13 @@ async def buy_game_pack(cb: types.CallbackQuery, state: FSMContext):
     price_syr = round(p_usd * rate, 2)
     await state.update_data(sec="games", service=f"شحن {g_key.upper()} ({p_name})", price=price_syr)
     await state.set_state(OrderState.entering_game_data)
-    await cb.message.edit_text(f"أدخل الآيدي (Player ID) واسم حسابك في اللعبة:")
+    await cb.message.edit_text("أدخل الآيدي (Player ID) واسم حسابك في اللعبة:")
 
 @dp.message(OrderState.entering_game_data)
 async def proc_game_data(message: types.Message, state: FSMContext):
     await state.update_data(target=f"آيدي اللعبة: {message.text.strip()}")
     await prompt_payment(message, state)
 
-# ====================================================================
-# [3] قسم تطبيقات الشات
-# ====================================================================
 @dp.callback_query(F.data == "sec_chat")
 async def chat_menu(cb: types.CallbackQuery):
     kb = [
@@ -384,18 +379,15 @@ async def proc_chat_calc(message: types.Message, state: FSMContext):
     except Exception:
         await message.reply("⚠️ تنسيق غير صحيح! أرسل الآيدي ثم الكمية وبينهما مسافة.")
 
-# ====================================================================
-# [4] قسم الحسابات الجاهزة
-# ====================================================================
 @dp.callback_query(F.data == "sec_accounts")
 async def accounts_menu(cb: types.CallbackQuery):
     kb = [
-        [InlineKeyboardButton(text="🤖 ChatGPT عادي (1,700 ل.س)", callback_data="acc_buy:ChatGPT عادي:1700")],[span_5](start_span)[span_5](end_span)
-        [InlineKeyboardButton(text="⚡ ChatGPT Go (2,000 ل.س)", callback_data="acc_buy:ChatGPT Go:2000")],[span_6](start_span)[span_6](end_span)
-        [InlineKeyboardButton(text="💎 ChatGPT Plus شهر (3,500 ل.س)", callback_data="acc_buy:ChatGPT Plus شهر:3500")],[span_7](start_span)[span_7](end_span)
-        [InlineKeyboardButton(text="🎬 Netflix شهر (800 ل.س)", callback_data="acc_buy:Netflix شهر:800")],[span_8](start_span)[span_8](end_span)
-        [InlineKeyboardButton(text="🍿 Netflix سنة (5,000 ل.س)", callback_data="acc_buy:Netflix سنة:5000")],[span_9](start_span)[span_9](end_span)
-        [InlineKeyboardButton(text="📋 باقي الحسابات (27 خدمة) [تسعير]", callback_data="quote:account")],[span_10](start_span)[span_10](end_span)
+        [InlineKeyboardButton(text="🤖 ChatGPT عادي (1,700 ل.س)", callback_data="acc_buy:ChatGPT عادي:1700")],
+        [InlineKeyboardButton(text="⚡ ChatGPT Go (2,000 ل.س)", callback_data="acc_buy:ChatGPT Go:2000")],
+        [InlineKeyboardButton(text="💎 ChatGPT Plus شهر (3,500 ل.س)", callback_data="acc_buy:ChatGPT Plus شهر:3500")],
+        [InlineKeyboardButton(text="🎬 Netflix شهر (800 ل.س)", callback_data="acc_buy:Netflix شهر:800")],
+        [InlineKeyboardButton(text="🍿 Netflix سنة (5,000 ل.س)", callback_data="acc_buy:Netflix سنة:5000")],
+        [InlineKeyboardButton(text="📋 باقي الحسابات (27 خدمة) [تسعير]", callback_data="quote:account")],
         [InlineKeyboardButton(text="🔙 القائمة الرئيسية", callback_data="back_main")]
     ]
     await cb.message.edit_text("اختر الحساب المطلوب:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
@@ -403,18 +395,15 @@ async def accounts_menu(cb: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("acc_buy:"))
 async def acc_buy_fixed(cb: types.CallbackQuery, state: FSMContext):
     _, name, price = cb.data.split(":")
-    await state.update_data(sec="accounts", service=f"حساب {name}", price=float(price), target="حساب جاهز مع الضمان")[span_11](start_span)[span_11](end_span)
+    await state.update_data(sec="accounts", service=f"حساب {name}", price=float(price), target="حساب جاهز مع الضمان")
     await prompt_payment_cb(cb, state)
 
-# ====================================================================
-# [5] قسم السوشيال ميديا والإعلانات والأرقام
-# ====================================================================
 @dp.callback_query(F.data == "sec_social")
 async def social_menu(cb: types.CallbackQuery):
     kb = [
         [InlineKeyboardButton(text="📘 خدمات فيسبوك", callback_data="soc:fb")],
         [InlineKeyboardButton(text="📸 خدمات إنستغرام", callback_data="soc:ig")],
-        [InlineKeyboardButton(text="✈️️ خدمات تلغرام", callback_data="soc:tg")],
+        [InlineKeyboardButton(text="✈ خدمات تلغرام", callback_data="soc:tg")],
         [InlineKeyboardButton(text="📢 إعلانات ممولة فيسبوك", callback_data="soc:ads")],
         [InlineKeyboardButton(text="🔙 القائمة الرئيسية", callback_data="back_main")]
     ]
@@ -423,10 +412,10 @@ async def social_menu(cb: types.CallbackQuery):
 @dp.callback_query(F.data == "soc:fb")
 async def fb_menu(cb: types.CallbackQuery):
     kb = [
-        [InlineKeyboardButton(text="👁 مشاهدات 10k (500 ل.س)", callback_data="sbuy:fb:مشاهدات 10k:500")],[span_12](start_span)[span_12](end_span)
-        [InlineKeyboardButton(text="👍 لايكات منشور 5k (700 ل.س)", callback_data="sbuy:fb:لايكات منشور 5k:700")],[span_13](start_span)[span_13](end_span)
-        [InlineKeyboardButton(text="👥 متابعين 1k (150 ل.س)", callback_data="sbuy:fb:متابعين 1k:150")],[span_14](start_span)[span_14](end_span)
-        [InlineKeyboardButton(text="💬 تعليقات عربية 200 (250 ل.س)", callback_data="sbuy:fb:تعليقات عربية 200:250")],[span_15](start_span)[span_15](end_span)
+        [InlineKeyboardButton(text="👁 مشاهدات 10k (500 ل.س)", callback_data="sbuy:fb:مشاهدات 10k:500")],
+        [InlineKeyboardButton(text="👍 لايكات منشور 5k (700 ل.س)", callback_data="sbuy:fb:لايكات منشور 5k:700")],
+        [InlineKeyboardButton(text="👥 متابعين 1k (150 ل.س)", callback_data="sbuy:fb:متابعين 1k:150")],
+        [InlineKeyboardButton(text="💬 تعليقات عربية 200 (250 ل.س)", callback_data="sbuy:fb:تعليقات عربية 200:250")],
         [InlineKeyboardButton(text="🔙 رجوع", callback_data="sec_social")]
     ]
     await cb.message.edit_text("باقات فيسبوك:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
@@ -434,10 +423,10 @@ async def fb_menu(cb: types.CallbackQuery):
 @dp.callback_query(F.data == "soc:ig")
 async def ig_menu(cb: types.CallbackQuery):
     kb = [
-        [InlineKeyboardButton(text="👁 مشاهدات 500k (300 ل.س)", callback_data="sbuy:ig:مشاهدات 500k:300")],[span_16](start_span)[span_16](end_span)
-        [InlineKeyboardButton(text="❤️ لايكات 5k (700 ل.س)", callback_data="sbuy:ig:لايكات 5k:700")],[span_17](start_span)[span_17](end_span)
-        [InlineKeyboardButton(text="👥 متابعين أجنبي 1k (700 ل.س)", callback_data="sbuy:ig:متابعين أجنبي 1k:700")],[span_18](start_span)[span_18](end_span)
-        [InlineKeyboardButton(text="👥 متابعين عربي 1k (1,350 ل.س)", callback_data="sbuy:ig:متابعين عربي 1k:1350")],[span_19](start_span)[span_19](end_span)
+        [InlineKeyboardButton(text="👁 مشاهدات 500k (300 ل.س)", callback_data="sbuy:ig:مشاهدات 500k:300")],
+        [InlineKeyboardButton(text="❤️ لايكات 5k (700 ل.س)", callback_data="sbuy:ig:لايكات 5k:700")],
+        [InlineKeyboardButton(text="👥 متابعين أجنبي 1k (700 ل.س)", callback_data="sbuy:ig:متابعين أجنبي 1k:700")],
+        [InlineKeyboardButton(text="👥 متابعين عربي 1k (1,350 ل.س)", callback_data="sbuy:ig:متابعين عربي 1k:1350")],
         [InlineKeyboardButton(text="🔙 رجوع", callback_data="sec_social")]
     ]
     await cb.message.edit_text("باقات إنستغرام:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
@@ -445,9 +434,9 @@ async def ig_menu(cb: types.CallbackQuery):
 @dp.callback_query(F.data == "soc:tg")
 async def tg_menu(cb: types.CallbackQuery):
     kb = [
-        [InlineKeyboardButton(text="👥 أعضاء قنوات 1k (400 ل.س)", callback_data="sbuy:tg:أعضاء 1k:400")],[span_20](start_span)[span_20](end_span)
-        [InlineKeyboardButton(text="🔥 تفاعلات 1k (150 ل.س)", callback_data="sbuy:tg:تفاعلات 1k:150")],[span_21](start_span)[span_21](end_span)
-        [InlineKeyboardButton(text="👁 مشاهدات 5k (200 ل.س)", callback_data="sbuy:tg:مشاهدات 5k:200")],[span_22](start_span)[span_22](end_span)
+        [InlineKeyboardButton(text="👥 أعضاء قنوات 1k (400 ل.س)", callback_data="sbuy:tg:أعضاء 1k:400")],
+        [InlineKeyboardButton(text="🔥 تفاعلات 1k (150 ل.س)", callback_data="sbuy:tg:تفاعلات 1k:150")],
+        [InlineKeyboardButton(text="👁 مشاهدات 5k (200 ل.س)", callback_data="sbuy:tg:مشاهدات 5k:200")],
         [InlineKeyboardButton(text="🔙 رجوع", callback_data="sec_social")]
     ]
     await cb.message.edit_text("باقات تلغرام:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
@@ -464,17 +453,16 @@ async def proc_soc_link(message: types.Message, state: FSMContext):
     await state.update_data(target=message.text.strip())
     await prompt_payment(message, state)
 
-# إعلانات ممولة فيسبوك
 AD_DAYS = [
     (1, 600), (2, 1100), (3, 1500), (4, 2000), (5, 2500),
     (6, 3000), (7, 3600), (10, 5000)
-][span_23](start_span)[span_23](end_span)
+]
 
 @dp.callback_query(F.data == "soc:ads")
 async def ads_menu(cb: types.CallbackQuery):
     buttons = []
     for d, p in AD_DAYS:
-        buttons.append(InlineKeyboardButton(text=f"إعلان {d} أيام ⬅ {p}ل.س", callback_data=f"ad_fixed:{d}:{p}"))[span_24](start_span)[span_24](end_span)
+        buttons.append(InlineKeyboardButton(text=f"إعلان {d} أيام ⬅ {p}ل.س", callback_data=f"ad_fixed:{d}:{p}"))
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append([InlineKeyboardButton(text="⚙️ تحديد أيام حسب الطلب (200 ل.س/يوم)", callback_data="ad_custom")])
     rows.append([InlineKeyboardButton(text="🔙 رجوع", callback_data="sec_social")])
@@ -483,9 +471,9 @@ async def ads_menu(cb: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("ad_fixed:"))
 async def ad_fixed_click(cb: types.CallbackQuery, state: FSMContext):
     _, d, p = cb.data.split(":")
-    await state.update_data(sec="social", service=f"إعلان ممول ({d} أيام)", price=float(p))[span_25](start_span)[span_25](end_span)
+    await state.update_data(sec="social", service=f"إعلان ممول ({d} أيام)", price=float(p))
     await state.set_state(OrderState.entering_ad_phone)
-    await cb.message.edit_text("يرجى كتابة رقم الهاتف للتواصل معك:")[span_26](start_span)[span_26](end_span)
+    await cb.message.edit_text("يرجى كتابة رقم الهاتف للتواصل معك:")
 
 @dp.callback_query(F.data == "ad_custom")
 async def ad_custom_click(cb: types.CallbackQuery, state: FSMContext):
@@ -499,16 +487,15 @@ async def proc_custom_ad(message: types.Message, state: FSMContext):
         price = days * 200
         await state.update_data(sec="social", service=f"إعلان ممول مخصص ({days} أيام)", price=price)
         await state.set_state(OrderState.entering_ad_phone)
-        await message.answer("أدخل رقم هاتفك للتواصل:")[span_27](start_span)[span_27](end_span)
+        await message.answer("أدخل رقم هاتفك للتواصل:")
     except Exception:
         await message.reply("⚠️ يرجى إدخال عدد صحيح بالأرقام:")
 
 @dp.message(OrderState.entering_ad_phone)
 async def proc_ad_phone(message: types.Message, state: FSMContext):
-    await state.update_data(target=f"رقم تواصل الإعلان: {message.text.strip()}")[span_28](start_span)[span_28](end_span)
+    await state.update_data(target=f"رقم تواصل الإعلان: {message.text.strip()}")
     await prompt_payment(message, state)
 
-# أرقام التفعيل
 @dp.callback_query(F.data == "sec_numbers")
 async def numbers_menu(cb: types.CallbackQuery, state: FSMContext):
     p_wa = get_setting("num_whatsapp")
@@ -531,13 +518,19 @@ async def buy_num_fast(cb: types.CallbackQuery, state: FSMContext):
     await state.update_data(sec="social", service=f"رقم {name}", price=price, target="رابط تفعيل")
     await prompt_payment_cb(cb, state)
 
-# نظام طلبات التسعير اليدوية الموحد
 @dp.callback_query(F.data.startswith("quote:"))
 async def generic_quote(cb: types.CallbackQuery):
     q_type = cb.data.split(":")[1]
-    g_map = {"game": ("games", "لعبة إضافية"), "chat": ("games", "تطبيق شات"), "account": ("accounts", "حساب جاهز"), "num_tiktok": ("social", "رقم تيك توك"), "num_google": ("social", "تفعيل غوغل"), "num_apple": ("social", "تفعيل آبل")}[span_29](start_span)[span_29](end_span)
+    g_map = {
+        "game": ("games", "لعبة إضافية"),
+        "chat": ("games", "تطبيق شات"),
+        "account": ("accounts", "حساب جاهز"),
+        "num_tiktok": ("social", "رقم تيك توك"),
+        "num_google": ("social", "تفعيل غوغل"),
+        "num_apple": ("social", "تفعيل آبل")
+    }
     sec, label = g_map.get(q_type, ("games", "طلب عام"))
-    group_id = GROUPS[sec][span_30](start_span)[span_30](end_span)
+    group_id = GROUPS[sec]
     text = (
         f"📩 **طلب تسعير جديد:**\n"
         f"👤 الزبون: @{cb.from_user.username or 'بدون'} (`{cb.from_user.id}`)\n"
@@ -548,9 +541,6 @@ async def generic_quote(cb: types.CallbackQuery):
     await bot.send_message(group_id, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
     await cb.answer("✅ تم إرسال طلبك للإدارة، سيصلك السعر هنا قريباً.", show_alert=True)
 
-# ====================================================================
-# آلية الدفع وشام كاش المشتركة
-# ====================================================================
 async def prompt_payment(message: types.Message, state: FSMContext):
     data = await state.get_data()
     price = data.get("price", 0)
@@ -581,7 +571,7 @@ async def prompt_payment_cb(cb: types.CallbackQuery, state: FSMContext):
 async def receive_receipt(message: types.Message, state: FSMContext):
     data = await state.get_data()
     sec = data.get("sec", "balance")
-    group_id = GROUPS.get(sec, GROUPS["balance"])[span_31](start_span)[span_31](end_span)
+    group_id = GROUPS.get(sec, GROUPS["balance"])
 
     order_info = (
         f"🔔 **طلب مسدد وجديد:**\n"
@@ -610,9 +600,6 @@ async def receive_receipt(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ تم استلام إشعار الدفع وإرساله لفريق الإدارة. سيتم إشعارك فور اكتمال التنفيذ.")
 
-# ====================================================================
-# إدارة الموظفين والردود
-# ====================================================================
 @dp.callback_query(F.data.startswith("done:"))
 async def order_done(cb: types.CallbackQuery):
     u_id = int(cb.data.split(":")[1])
@@ -661,9 +648,6 @@ async def deliver_link(message: types.Message, state: FSMContext):
     except Exception as e:
         await message.reply(f"⚠️ فشل الإرسال: {e}")
 
-# ====================================================================
-# [6] قسم الدعم الفني والشكاوى
-# ====================================================================
 @dp.callback_query(F.data == "sec_support")
 async def support_start(cb: types.CallbackQuery, state: FSMContext):
     await state.set_state(OrderState.support_ticket)
@@ -676,7 +660,7 @@ async def support_forward(message: types.Message, state: FSMContext):
         f"👤 الزبون: @{message.from_user.username or 'بدون'} (`{message.from_user.id}`)\n\n"
         f"📝 الرسالة:\n{message.text}"
     )
-    await bot.send_message(GROUPS["support"], txt, parse_mode="Markdown")[span_32](start_span)[span_32](end_span)
+    await bot.send_message(GROUPS["support"], txt, parse_mode="Markdown")
     await state.clear()
     await message.answer("✅ تم إرسال رسالتك للدعم الفني، سنرد عليك هنا بأقرب وقت.")
 
@@ -689,11 +673,8 @@ async def support_group_reply(message: types.Message):
             await bot.send_message(cust_id, f"💬 **رد الدعم الفني:**\n\n{message.text}")
             await message.reply("✅ تم توصيل الرد للزبون.")
         except Exception as e:
-            await message.reply(f"⚠️ فشل الإرسال: {e}")
+            await message.reply(f"⚠️️ فشل الإرسال: {e}")
 
-# ====================================================================
-# التشغيل
-# ====================================================================
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
