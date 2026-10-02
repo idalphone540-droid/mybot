@@ -27,12 +27,9 @@ from aiogram.types import (
 # =====================================================================
 # 1. الإعدادات والمتغيرات الأساسية
 # =====================================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    # ضع التوكن هنا أو مرره كمتغير بيئة
-    BOT_TOKEN = "8774564171:AAE_kxJM-yZ97f52_dTGwnKTLyfvsARM5Ik"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8774564171:AAE_kxJM-yZ97f52_dTGwnKTLyfvsARM5Ik")
+ADMIN_ID = 5346581925  # آيدي الأدمن الخاص بك تم تثبيته هنا
 
-ADMIN_ID = int(os.getenv("ADMIN_ID", "5346581925"))  # ضع آيدي حسابك الحقيقي هنا
 CHANNEL_ID = -1004492385043
 CHANNEL_LINK = "https://t.me/SyriaStore_ch"
 
@@ -65,7 +62,6 @@ def get_user_lock(user_id: int) -> asyncio.Lock:
         wallet_locks[user_id] = asyncio.Lock()
     return wallet_locks[user_id]
 
-# دالة توليد معرفات فريدة
 def generate_uid(prefix: str = "ORD") -> str:
     suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
     return f"{prefix}-{int(time.time()) % 1000000:06d}-{suffix}"
@@ -148,6 +144,9 @@ async def init_db():
         );
         """)
         await db.execute("INSERT OR IGNORE INTO settings (key, val) VALUES ('dollar_rate', 150.0);")
+        
+        # التأكد من ترقية حسابك كمدير في قاعدة البيانات عند التهيئة
+        await db.execute("UPDATE users SET role = 'ADMIN' WHERE user_id = ?", (ADMIN_ID,))
         await db.commit()
 
 # =====================================================================
@@ -167,11 +166,17 @@ class WalletService:
                 )
                 await db.commit()
                 return (user_id, username, 0, 0, 0, role, None)
+            
+            # تحديث الرتبة في حال كان المستخدم هو الآدمن
+            if user_id == ADMIN_ID and row[5] != "ADMIN":
+                await db.execute("UPDATE users SET role = 'ADMIN' WHERE user_id = ?", (user_id,))
+                await db.commit()
+                return (row[0], row[1], row[2], row[3], row[4], "ADMIN", row[6])
+                
             return row
 
     @staticmethod
     async def deposit(user_id: int, amount: int, ref_id: str, note: str = "") -> bool:
-        """إيداع رصيد بالمحفظة وتسجيل قيد في الـ Ledger"""
         if amount <= 0:
             return False
         async with get_user_lock(user_id):
@@ -195,7 +200,6 @@ class WalletService:
 
     @staticmethod
     async def deduct_for_order(user_id: int, order_id: str, amount: int) -> bool:
-        """خصم آمن وذري لشراء خدمة مع تسجيل القيد"""
         if amount <= 0:
             return False
         async with get_user_lock(user_id):
@@ -227,7 +231,6 @@ class WalletService:
 
     @staticmethod
     async def refund(order_id: str) -> Tuple[bool, int, int]:
-        """استرجاع مبلغ طلب ملغي للمحفظة فوراً"""
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("SELECT user_id, price, status FROM orders WHERE order_id = ?", (order_id,))
             order = await cursor.fetchone()
@@ -295,7 +298,7 @@ async def start_handler(message: types.Message, state: FSMContext):
         await message.answer("⛔ حسابك محظور من استخدام البوت.")
         return
 
-    rank = "🌟 زبون دائم (VIP)" if u[3] == 1 else "👤 زبون عادي"
+    rank = "🌟 المدير العام" if u[0] == ADMIN_ID else ("🌟 زبون دائم (VIP)" if u[3] == 1 else "👤 زبون عادي")
     text = (
         f"👋 <b>مرحباً بك في سوريا ستور (Syria Store)</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
@@ -335,7 +338,7 @@ async def wallet_amt_rec(message: types.Message, state: FSMContext):
     try:
         amt = int(message.text.strip().replace(",", ""))
         if amt < 1000:
-            await message.reply("⚠️️ الحد الأدنى للإيداع هو 1,000 ل.س:")
+            await message.reply("⚠️ الحد الأدنى للإيداع هو 1,000 ل.س:")
             return
         await state.update_data(dep_amt=amt)
         await state.set_state(WalletFlow.tx_code)
@@ -343,7 +346,7 @@ async def wallet_amt_rec(message: types.Message, state: FSMContext):
             f"🧾 <b>طلب شحن محفظة بقيمة: {amt:,} ل.س</b>\n\n"
             f"👤 الاسم: <code>{html.escape(SHAM_NAME)}</code>\n"
             f"🔗 العنوان: <code>{html.escape(SHAM_ADDR)}</code>\n\n"
-            f"⚠️ قم بالتحويل، ثم <b>أرسل رقم العملية (Transaction ID) الخاص بشام كاش هنا</b> لمنع التكرار:"
+            f"⚠️️ قم بالتحويل، ثم <b>أرسل رقم العملية (Transaction ID) الخاص بشام كاش هنا</b>:"
         )
     except Exception:
         await message.reply("⚠️ يرجى إدخال مبلغ صحيح بالأرقام:")
@@ -351,7 +354,6 @@ async def wallet_amt_rec(message: types.Message, state: FSMContext):
 @dp.message(WalletFlow.tx_code)
 async def wallet_tx_rec(message: types.Message, state: FSMContext):
     tx_code = message.text.strip()
-    # التحقق من أن رقم العملية غير مكرر
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("SELECT payment_id FROM payments WHERE sham_tx_id = ?", (tx_code,))
         if await cursor.fetchone():
@@ -396,7 +398,6 @@ async def wallet_receipt_rec(message: types.Message, state: FSMContext):
 
 # ----------------- معالج الشراء والدفع الموحد -----------------
 async def create_and_route_order(cb_or_msg, user_id: int, dept: str, service: str, target: str, price: int, state: FSMContext):
-    """إنشاء الطلب في قاعدة البيانات وعرض خيارات الدفع الذكية"""
     ord_id = generate_uid("ORD")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -444,7 +445,6 @@ async def pay_wallet_exec(cb: types.CallbackQuery):
         await cb.answer("⚠️ رصيد محفظتك غير كافٍ!", show_alert=True)
         return
 
-    # إرسال الطلب فوراً لمجموعة القسم المختص
     group_id = GROUPS.get(dept, GROUPS["balance"])
     u_info = f"@{html.escape(cb.from_user.username)}" if cb.from_user.username else "بدون"
     text_to_group = (
@@ -613,13 +613,18 @@ async def admin_group_direct_reply(message: types.Message):
             await message.reply(f"⚠️ تعذر الإرسال: {e}")
 
 # =====================================================================
-# 7. لوحة الإدارة الشاملة (/admin)
+# 7. لوحة الإدارة الشاملة (/admin) - فحص مباشر وترقية فورية
 # =====================================================================
 @dp.message(Command("admin"))
 async def admin_panel_start(message: types.Message):
-    u = await WalletService.get_or_create_user(message.from_user.id)
-    if u[5] != "ADMIN":
+    if message.from_user.id != ADMIN_ID:
+        await message.reply("⛔ هذا الأمر مخصص للمدير العام فقط!")
         return
+
+    # ترقية فورية في قاعدة البيانات لضمان الصلاحيات
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET role = 'ADMIN' WHERE user_id = ?", (ADMIN_ID,))
+        await db.commit()
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 إحصائيات النظام", callback_data="adm:stats"), InlineKeyboardButton(text="👥 بحث عن مستخدم", callback_data="adm:find_user")],
@@ -631,6 +636,10 @@ async def admin_panel_start(message: types.Message):
 
 @dp.callback_query(F.data == "adm:stats")
 async def adm_stats_view(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("⛔ لا تملك صلاحية!", show_alert=True)
+        return
+
     async with aiosqlite.connect(DB_PATH) as db:
         c1 = await db.execute("SELECT COUNT(*) FROM users")
         total_users = (await c1.fetchone())[0]
@@ -650,6 +659,10 @@ async def adm_stats_view(cb: types.CallbackQuery):
 
 @dp.callback_query(F.data == "adm:home")
 async def adm_home_return(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("⛔ لا تملك صلاحية!", show_alert=True)
+        return
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 إحصائيات النظام", callback_data="adm:stats"), InlineKeyboardButton(text="👥 بحث عن مستخدم", callback_data="adm:find_user")],
         [InlineKeyboardButton(text="💵 تعديل رصيد مستخدم", callback_data="adm:edit_bal"), InlineKeyboardButton(text="💱 سعر صرف الدولار", callback_data="adm:set_rate")],
@@ -666,7 +679,7 @@ async def adm_close(cb: types.CallbackQuery):
 async def back_to_home_cb(cb: types.CallbackQuery, state: FSMContext):
     await state.clear()
     u = await WalletService.get_or_create_user(cb.from_user.id)
-    rank = "🌟 زبون دائم (VIP)" if u[3] == 1 else "👤 زبون عادي"
+    rank = "🌟 المدير العام" if u[0] == ADMIN_ID else ("🌟 زبون دائم (VIP)" if u[3] == 1 else "👤 زبون عادي")
     text = (
         f"👋 <b>مرحباً بك في سوريا ستور (Syria Store)</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
@@ -679,7 +692,7 @@ async def back_to_home_cb(cb: types.CallbackQuery, state: FSMContext):
     await cb.message.edit_text(text, reply_markup=client_main_kb())
 
 # =====================================================================
-# 8. نموذج تجريبي لقسم الشحن (للتأكد من عمل دورة الطلب كاملة)
+# 8. نموذج تجريبي لقسم الشحن
 # =====================================================================
 @dp.callback_query(F.data == "sec:games")
 async def test_game_menu(cb: types.CallbackQuery):
