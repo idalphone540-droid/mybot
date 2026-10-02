@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import re
 import sqlite3
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart, Command
@@ -15,8 +17,9 @@ from aiogram.types import (
 )
 
 # ----------------- الإعدادات والمجموعات -----------------
+# يفضل وضع التوكن في متغيرات البيئة os.getenv("BOT_TOKEN")
 BOT_TOKEN = "8774564171:AAE_kxJM-yZ97f52_dTGwnKTLyfvsARM5Ik"
-ADMIN_ID = 123456789  # آيدي الأدمن الأساسي
+ADMIN_ID = 123456789  # استبدله بآيدي الأدمن الأساسي
 
 CHANNEL_ID = -1004492385043
 CHANNEL_LINK = "https://t.me/SyriaStore_ch"
@@ -29,6 +32,8 @@ GROUPS = {
     "social": -1004411774893,   # إدارة السوشيال والأرقام
     "support": -1004420804667   # إدارة الدعم الفني
 }
+
+ALL_ADMIN_GROUPS = list(GROUPS.values())
 
 SHAM_NAME = "سكينه حمود طه"
 SHAM_ADDR = "be03739e320f3dfd318a1a7faebae16a"
@@ -74,7 +79,6 @@ def get_user(user_id: int, username: str = ""):
 
 def update_user_balance(user_id: int, delta: float):
     cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (delta, user_id))
-    # ترقية تلقائية للزبون الدائم إذا شحن المحفظة
     cursor.execute("UPDATE users SET is_vip = 1 WHERE user_id=? AND balance > 0", (user_id,))
     conn.commit()
 
@@ -87,7 +91,6 @@ def update_setting(key: str, val: float):
     cursor.execute("UPDATE settings SET val=? WHERE key=?", (val, key))
     conn.commit()
 
-# الزر الثابت أسفل الشاشة
 def persistent_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📋 القائمة الرئيسية")]],
@@ -109,6 +112,9 @@ def sub_check_keyboard():
         [InlineKeyboardButton(text="📢 اشترك في القناة أولاً", url=CHANNEL_LINK)],
         [InlineKeyboardButton(text="🔄 تم الاشتراك (تأكيد)", callback_data="check_subscription")]
     ])
+
+def is_admin_or_group(user_id: int, chat_id: int) -> bool:
+    return user_id == ADMIN_ID or chat_id in ALL_ADMIN_GROUPS
 
 # ----------------- الكتالوج والبيانات -----------------
 GOVERNORATES = [
@@ -183,9 +189,7 @@ class OrderState(StatesGroup):
 
     waiting_receipt = State()
     support_ticket = State()
-    admin_sending_link = State()
 
-    # شحن المحفظة
     wallet_deposit_amt = State()
     wallet_deposit_receipt = State()
 
@@ -234,7 +238,10 @@ async def start_cmd(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data == "check_subscription")
 async def check_sub_cb(cb: types.CallbackQuery):
     if await is_subscribed(cb.from_user.id):
-        await cb.message.delete()
+        try:
+            await cb.message.delete()
+        except Exception:
+            pass
         text, kb = main_menu_text_and_kb(cb.from_user.id, cb.from_user.username or "")
         await cb.message.answer(text, reply_markup=kb, parse_mode="Markdown")
     else:
@@ -244,7 +251,10 @@ async def check_sub_cb(cb: types.CallbackQuery):
 async def back_to_main(cb: types.CallbackQuery, state: FSMContext):
     await state.clear()
     text, kb = main_menu_text_and_kb(cb.from_user.id, cb.from_user.username or "")
-    await cb.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    try:
+        await cb.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    except Exception:
+        await cb.message.answer(text, reply_markup=kb, parse_mode="Markdown")
 
 # ----------------- قسم المحفظة والمالية -----------------
 @dp.callback_query(F.data == "sec_wallet")
@@ -294,10 +304,10 @@ async def wallet_dep_amt_receive(message: types.Message, state: FSMContext):
             f"🔗 العنوان: `{SHAM_ADDR}`\n\n"
             f"⚠️ يرجى تحويل المبلغ ثم **رفع صورة إشعار التحويل هنا فوراً**."
         )
-        try:
+        if os.path.exists(QR_IMAGE_PATH):
             photo = FSInputFile(QR_IMAGE_PATH)
             await message.answer_photo(photo, caption=txt, parse_mode="Markdown")
-        except Exception:
+        else:
             await message.answer(txt, parse_mode="Markdown")
     except Exception:
         await message.reply("⚠️ يرجى إدخال مبلغ صحيح بالأرقام:")
@@ -336,6 +346,10 @@ async def wallet_dep_receipt_proc(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("wconf:"))
 async def wallet_admin_confirm(cb: types.CallbackQuery):
+    if not is_admin_or_group(cb.from_user.id, cb.message.chat.id):
+        await cb.answer("⛔ لا تملك صلاحية تنفيذ هذا الإجراء!", show_alert=True)
+        return
+
     _, u_id, amt = cb.data.split(":")
     u_id = int(u_id)
     amt = float(amt)
@@ -357,6 +371,10 @@ async def wallet_admin_confirm(cb: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("wrej:"))
 async def wallet_admin_reject(cb: types.CallbackQuery):
+    if not is_admin_or_group(cb.from_user.id, cb.message.chat.id):
+        await cb.answer("⛔ لا تملك صلاحية تنفيذ هذا الإجراء!", show_alert=True)
+        return
+
     u_id = int(cb.data.split(":")[1])
     try:
         await bot.send_message(u_id, "❌ نعتذر منك، تم رفض إشعار الإيداع لعدم تطابق التحويل.")
@@ -365,7 +383,7 @@ async def wallet_admin_reject(cb: types.CallbackQuery):
     except Exception as e:
         await cb.answer(f"خطأ: {e}", show_alert=True)
 
-# ----------------- آلية الدفع الذكية (المحفظة vs الدفع المباشر) -----------------
+# ----------------- آلية الدفع الذكية -----------------
 async def prompt_payment(message: types.Message, state: FSMContext, user_id: int):
     data = await state.get_data()
     price = data.get("price", 0)
@@ -375,7 +393,6 @@ async def prompt_payment(message: types.Message, state: FSMContext, user_id: int
     user = get_user(user_id)
     balance = user[2]
 
-    # أزرار الدفع
     kb = []
     if balance >= price:
         kb.append([InlineKeyboardButton(text=f"⚡ خصم فوري من المحفظة ({price:,.0f} ل.س)", callback_data="pay_wallet")])
@@ -410,7 +427,6 @@ async def execute_wallet_pay(cb: types.CallbackQuery, state: FSMContext):
         await cb.answer("⚠️ رصيد محفظتك غير كافٍ! اختر الدفع اليدوي أو اشحن محفظتك.", show_alert=True)
         return
 
-    # خصم فوري
     update_user_balance(cb.from_user.id, -price)
     new_user = get_user(cb.from_user.id)
 
@@ -421,7 +437,8 @@ async def execute_wallet_pay(cb: types.CallbackQuery, state: FSMContext):
         f"🏷 الخدمة: **{service}**\n"
         f"🎯 البيانات: `{target}`\n"
         f"💰 المبلغ المخصوم: **{price:,.2f} ل.س**\n"
-        f"💳 رصيد المحفظة المتبقي: **{new_user[2]:,.2f} ل.س**\n"
+        f"💳 رصيد المحفظة المتبقي: **{new_user[2]:,.2f} ل.س**\n\n"
+        f"💡 للرد على الزبون، قم بالرد المباشر (Reply) على هذه الرسالة."
     )
     kb = [
         [
@@ -429,8 +446,6 @@ async def execute_wallet_pay(cb: types.CallbackQuery, state: FSMContext):
             InlineKeyboardButton(text="❌ إلغاء وإرجاع الرصيد", callback_data=f"refund:{cb.from_user.id}:{price}")
         ]
     ]
-    if sec == "social" and "رقم" in service:
-        kb.append([InlineKeyboardButton(text="🔗 إرسال رابط التفعيل", callback_data=f"sendlink:{cb.from_user.id}")])
 
     await bot.send_message(group_id, order_info, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
     await state.clear()
@@ -456,10 +471,10 @@ async def manual_pay_prompt(cb: types.CallbackQuery, state: FSMContext):
         f"⚠️ يرجى تحويل المبلغ ثم **رفع صورة إشعار التحويل هنا فوراً**."
     )
     await state.set_state(OrderState.waiting_receipt)
-    try:
+    if os.path.exists(QR_IMAGE_PATH):
         photo = FSInputFile(QR_IMAGE_PATH)
         await cb.message.answer_photo(photo, caption=pay_text, parse_mode="Markdown")
-    except Exception:
+    else:
         await cb.message.answer(pay_text, parse_mode="Markdown")
     await cb.answer()
 
@@ -474,7 +489,8 @@ async def receive_manual_receipt(message: types.Message, state: FSMContext):
         f"👤 الزبون: @{message.from_user.username or 'بدون'} (`{message.from_user.id}`)\n"
         f"🏷 الخدمة: {data.get('service')}\n"
         f"🎯 البيانات: `{data.get('target')}`\n"
-        f"💰 المبلغ المطلوب: **{data.get('price')} ل.س**\n"
+        f"💰 المبلغ المطلوب: **{data.get('price')} ل.س**\n\n"
+        f"💡 للرد على الزبون، قم بالرد المباشر (Reply) على هذه الرسالة."
     )
     kb = [
         [
@@ -482,8 +498,6 @@ async def receive_manual_receipt(message: types.Message, state: FSMContext):
             InlineKeyboardButton(text="❌ رفض الطلب", callback_data=f"rej:{message.from_user.id}")
         ]
     ]
-    if sec == "social" and "رقم" in data.get("service", ""):
-        kb.append([InlineKeyboardButton(text="🔗 إرسال رابط التفعيل", callback_data=f"sendlink:{message.from_user.id}")])
 
     await bot.send_photo(
         chat_id=group_id,
@@ -501,6 +515,10 @@ async def receive_manual_receipt(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("refund:"))
 async def refund_wallet(cb: types.CallbackQuery):
+    if not is_admin_or_group(cb.from_user.id, cb.message.chat.id):
+        await cb.answer("⛔ لا تملك صلاحية!", show_alert=True)
+        return
+
     _, u_id, amt = cb.data.split(":")
     u_id = int(u_id)
     amt = float(amt)
@@ -509,7 +527,7 @@ async def refund_wallet(cb: types.CallbackQuery):
         await bot.send_message(u_id, f"↩️ تم إلغاء الطلب وإرجاع **{amt:,.2f} ل.س** إلى رصيد محفظتك.")
         if cb.message.caption:
             await cb.message.edit_caption(caption=cb.message.caption + "\n\n🟡 **تم الإلغاء واسترجاع المبلغ للمحفظة**", reply_markup=None)
-        else:
+        elif cb.message.text:
             await cb.message.edit_text(text=cb.message.text + "\n\n🟡 **تم الإلغاء واسترجاع المبلغ للمحفظة**", reply_markup=None)
     except Exception as e:
         await cb.answer(f"خطأ: {e}", show_alert=True)
@@ -800,8 +818,9 @@ async def proc_chat_calc(message: types.Message, state: FSMContext):
     data = await state.get_data()
     c_key = data.get("chat_app")
     try:
-        u_id, qty = message.text.strip().split()
-        qty = float(qty)
+        parts = message.text.strip().split()
+        u_id = parts[0]
+        qty = float(parts[1])
         if c_key == "soulstar":
             price = round(qty * 0.025, 2)
             s_name = "Soul Star"
@@ -818,9 +837,9 @@ async def proc_chat_calc(message: types.Message, state: FSMContext):
         await state.update_data(service=f"شحن {s_name}", target=f"الآيدي: {u_id} | الكمية: {qty}", price=price)
         await prompt_payment(message, state, message.from_user.id)
     except Exception:
-        await message.reply("⚠️ أرسل الآيدي ثم الكمية وبينهما مسافة.")
+        await message.reply("⚠️ أرسل الآيدي ثم الكمية وبينهما مسافة بشكل صحيح.")
 
-# ----------------- قسم الحسابات والاشتراكات (الـ 27 حساباً كاملة) -----------------
+# ----------------- قسم الحسابات والاشتراكات -----------------
 @dp.callback_query(F.data == "sec_accounts")
 async def accounts_menu(cb: types.CallbackQuery):
     kb = [
@@ -918,37 +937,46 @@ async def social_menu(cb: types.CallbackQuery):
     ]
     await cb.message.edit_text("اختر منصة السوشيال ميديا:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-@dp.callback_query(F.data == "soc:fb")
-async def fb_menu(cb: types.CallbackQuery):
-    kb = [
-        [InlineKeyboardButton(text="👁 مشاهدات 10k (500 ل.س)", callback_data="sbuy:fb:مشاهدات 10k:500")],
-        [InlineKeyboardButton(text="👍 لايكات منشور 5k (700 ل.س)", callback_data="sbuy:fb:لايكات منشور 5k:700")],
-        [InlineKeyboardButton(text="👥 متابعين 1k (150 ل.س)", callback_data="sbuy:fb:متابعين 1k:150")],
-        [InlineKeyboardButton(text="💬 تعليقات عربية 200 (250 ل.س)", callback_data="sbuy:fb:تعليقات عربية 200:250")],
-        [InlineKeyboardButton(text="🔙 رجوع", callback_data="sec_social")]
-    ]
-    await cb.message.edit_text("باقات فيسبوك:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-
-@dp.callback_query(F.data == "soc:ig")
-async def ig_menu(cb: types.CallbackQuery):
-    kb = [
-        [InlineKeyboardButton(text="👁 مشاهدات 500k (300 ل.س)", callback_data="sbuy:ig:مشاهدات 500k:300")],
-        [InlineKeyboardButton(text="❤️ لايكات 5k (700 ل.س)", callback_data="sbuy:ig:لايكات 5k:700")],
-        [InlineKeyboardButton(text="👥 متابعين أجنبي 1k (700 ل.س)", callback_data="sbuy:ig:متابعين أجنبي 1k:700")],
-        [InlineKeyboardButton(text="👥 متابعين عربي 1k (1,350 ل.س)", callback_data="sbuy:ig:متابعين عربي 1k:1350")],
-        [InlineKeyboardButton(text="🔙 رجوع", callback_data="sec_social")]
-    ]
-    await cb.message.edit_text("باقات إنستغرام:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-
-@dp.callback_query(F.data == "soc:tg")
-async def tg_menu(cb: types.CallbackQuery):
-    kb = [
-        [InlineKeyboardButton(text="👥 أعضاء قنوات 1k (400 ل.س)", callback_data="sbuy:tg:أعضاء 1k:400")],
-        [InlineKeyboardButton(text="🔥 تفاعلات 1k (150 ل.س)", callback_data="sbuy:tg:تفاعلات 1k:150")],
-        [InlineKeyboardButton(text="👁 مشاهدات 5k (200 ل.س)", callback_data="sbuy:tg:مشاهدات 5k:200")],
-        [InlineKeyboardButton(text="🔙 رجوع", callback_data="sec_social")]
-    ]
-    await cb.message.edit_text("باقات تلغرام:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+@dp.callback_query(F.data.startswith("soc:"))
+async def soc_platforms(cb: types.CallbackQuery):
+    plat = cb.data.split(":")[1]
+    if plat == "fb":
+        kb = [
+            [InlineKeyboardButton(text="👁 مشاهدات 10k (500 ل.س)", callback_data="sbuy:fb:مشاهدات 10k:500")],
+            [InlineKeyboardButton(text="👍 لايكات منشور 5k (700 ل.س)", callback_data="sbuy:fb:لايكات منشور 5k:700")],
+            [InlineKeyboardButton(text="👥 متابعين 1k (150 ل.س)", callback_data="sbuy:fb:متابعين 1k:150")],
+            [InlineKeyboardButton(text="💬 تعليقات عربية 200 (250 ل.س)", callback_data="sbuy:fb:تعليقات عربية 200:250")],
+            [InlineKeyboardButton(text="🔙 رجوع", callback_data="sec_social")]
+        ]
+        await cb.message.edit_text("باقات فيسبوك:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    elif plat == "ig":
+        kb = [
+            [InlineKeyboardButton(text="👁 مشاهدات 500k (300 ل.س)", callback_data="sbuy:ig:مشاهدات 500k:300")],
+            [InlineKeyboardButton(text="❤️ لايكات 5k (700 ل.س)", callback_data="sbuy:ig:لايكات 5k:700")],
+            [InlineKeyboardButton(text="👥 متابعين أجنبي 1k (700 ل.س)", callback_data="sbuy:ig:متابعين أجنبي 1k:700")],
+            [InlineKeyboardButton(text="👥 متابعين عربي 1k (1,350 ل.س)", callback_data="sbuy:ig:متابعين عربي 1k:1350")],
+            [InlineKeyboardButton(text="🔙 رجوع", callback_data="sec_social")]
+        ]
+        await cb.message.edit_text("باقات إنستغرام:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    elif plat == "tg":
+        kb = [
+            [InlineKeyboardButton(text="👥 أعضاء قنوات 1k (400 ل.س)", callback_data="sbuy:tg:أعضاء 1k:400")],
+            [InlineKeyboardButton(text="🔥 تفاعلات 1k (150 ل.س)", callback_data="sbuy:tg:تفاعلات 1k:150")],
+            [InlineKeyboardButton(text="👁 مشاهدات 5k (200 ل.س)", callback_data="sbuy:tg:مشاهدات 5k:200")],
+            [InlineKeyboardButton(text="🔙 رجوع", callback_data="sec_social")]
+        ]
+        await cb.message.edit_text("باقات تلغرام:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    elif plat == "ads":
+        buttons = []
+        for d, p in [
+            (1, 600), (2, 1100), (3, 1500), (4, 2000), (5, 2500),
+            (6, 3000), (7, 3600), (10, 5000)
+        ]:
+            buttons.append(InlineKeyboardButton(text=f"إعلان {d} أيام ⬅ {p}ل.س", callback_data=f"ad_f:{d}:{p}"))
+        rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+        rows.append([InlineKeyboardButton(text="⚙ مدة مخصصة (200 ل.س/يوم)", callback_data="ad_c")])
+        rows.append([InlineKeyboardButton(text="🔙 رجوع", callback_data="sec_social")])
+        await cb.message.edit_text("اختر مدة الإعلان الممول:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 @dp.callback_query(F.data.startswith("sbuy:"))
 async def soc_buy(cb: types.CallbackQuery, state: FSMContext):
@@ -961,21 +989,6 @@ async def soc_buy(cb: types.CallbackQuery, state: FSMContext):
 async def proc_soc_link(message: types.Message, state: FSMContext):
     await state.update_data(target=message.text.strip())
     await prompt_payment(message, state, message.from_user.id)
-
-AD_DAYS = [
-    (1, 600), (2, 1100), (3, 1500), (4, 2000), (5, 2500),
-    (6, 3000), (7, 3600), (10, 5000)
-]
-
-@dp.callback_query(F.data == "soc:ads")
-async def ads_menu(cb: types.CallbackQuery):
-    buttons = []
-    for d, p in AD_DAYS:
-        buttons.append(InlineKeyboardButton(text=f"إعلان {d} أيام ⬅ {p}ل.س", callback_data=f"ad_f:{d}:{p}"))
-    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
-    rows.append([InlineKeyboardButton(text="⚙ مدة مخصصة (200 ل.س/يوم)", callback_data="ad_c")])
-    rows.append([InlineKeyboardButton(text="🔙 رجوع", callback_data="sec_social")])
-    await cb.message.edit_text("اختر مدة الإعلان الممول:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 @dp.callback_query(F.data.startswith("ad_f:"))
 async def ad_f_click(cb: types.CallbackQuery, state: FSMContext):
@@ -1006,7 +1019,7 @@ async def proc_ad_phone(message: types.Message, state: FSMContext):
     await prompt_payment(message, state, message.from_user.id)
 
 @dp.callback_query(F.data == "sec_numbers")
-async def numbers_menu(cb: types.CallbackQuery, state: FSMContext):
+async def numbers_menu(cb: types.CallbackQuery):
     p_wa = get_setting("num_whatsapp")
     p_tg = get_setting("num_telegram")
     kb = [
@@ -1059,7 +1072,7 @@ async def generic_quote_receive(message: types.Message, state: FSMContext):
         f"📩 **{label}:**\n"
         f"👤 الزبون: {user_info} (`{message.from_user.id}`)\n"
         f"📝 **التفاصيل:**\n{message.text}\n\n"
-        f"💡 لتسعير الطلب، قم بالرد المباشر (Reply) على هذه الرسالة واكتب السعر للزبون."
+        f"💡 لتسعير الطلب والرد على الزبون، قم بعمل رد (Reply) مباشر على هذه الرسالة واكتب السعر والتفاصيل."
     )
     await bot.send_message(group_id, text_to_group, parse_mode="Markdown")
     await state.clear()
@@ -1069,57 +1082,59 @@ async def generic_quote_receive(message: types.Message, state: FSMContext):
         reply_markup=menu_kb
     )
 
+# ----------------- معالجة الردود من الإدارة في جميع المجموعات -----------------
+@dp.message(F.chat.id.in_(ALL_ADMIN_GROUPS), F.reply_to_message)
+async def admin_group_reply_handler(message: types.Message):
+    orig = message.reply_to_message.text or message.reply_to_message.caption or ""
+    # استخراج الآيدي بين علامات (` و `)
+    match = re.search(r"\(`(\d+)`\)", orig)
+    if match:
+        try:
+            cust_id = int(match.group(1))
+            text, menu_kb = main_menu_text_and_kb(cust_id, "")
+            await bot.send_message(
+                cust_id,
+                f"💬 **إشعار من الإدارة بخصوص طلبك:**\n\n{message.text}",
+                reply_markup=menu_kb
+            )
+            await message.reply("✅ تم إيصال رسالتك إلى الزبون بنجاح.")
+        except Exception as e:
+            await message.reply(f"⚠️ فشل إرسال الرد للزبون: {e}")
+
 # ----------------- إدارة الطلبات والدعم -----------------
 @dp.callback_query(F.data.startswith("done:"))
 async def order_done(cb: types.CallbackQuery):
+    if not is_admin_or_group(cb.from_user.id, cb.message.chat.id):
+        await cb.answer("⛔ لا تملك صلاحية!", show_alert=True)
+        return
+
     u_id = int(cb.data.split(":")[1])
     try:
         text, menu_kb = main_menu_text_and_kb(u_id, "")
         await bot.send_message(u_id, "✅ تم تنفيذ طلبك بنجاح! شكراً لتعاملك معنا.", reply_markup=menu_kb)
         if cb.message.caption:
             await cb.message.edit_caption(caption=cb.message.caption + "\n\n🟢 **تم التنفيذ**", reply_markup=None)
-        else:
+        elif cb.message.text:
             await cb.message.edit_text(text=cb.message.text + "\n\n🟢 **تم التنفيذ**", reply_markup=None)
     except Exception as e:
         await cb.answer(f"خطأ: {e}", show_alert=True)
 
 @dp.callback_query(F.data.startswith("rej:"))
 async def order_reject(cb: types.CallbackQuery):
+    if not is_admin_or_group(cb.from_user.id, cb.message.chat.id):
+        await cb.answer("⛔ لا تملك صلاحية!", show_alert=True)
+        return
+
     u_id = int(cb.data.split(":")[1])
     try:
         text, menu_kb = main_menu_text_and_kb(u_id, "")
         await bot.send_message(u_id, "❌ نعتذر منك، تم رفض الطلب لوجود خطأ في الإشعار أو البيانات.", reply_markup=menu_kb)
         if cb.message.caption:
             await cb.message.edit_caption(caption=cb.message.caption + "\n\n🔴 **تم الرفض**", reply_markup=None)
-        else:
+        elif cb.message.text:
             await cb.message.edit_text(text=cb.message.text + "\n\n🔴 **تم الرفض**", reply_markup=None)
     except Exception as e:
         await cb.answer(f"خطأ: {e}", show_alert=True)
-
-@dp.callback_query(F.data.startswith("sendlink:"))
-async def ask_admin_link(cb: types.CallbackQuery, state: FSMContext):
-    u_id = cb.data.split(":")[1]
-    await state.update_data(target_cust=u_id)
-    await state.set_state(OrderState.admin_sending_link)
-    await cb.message.reply("✏️ أرسل الآن رابط التفعيل فقط ليتم تحويله للزبون:")
-
-@dp.message(OrderState.admin_sending_link)
-async def deliver_link(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    c_id = int(data.get("target_cust"))
-    link = message.text.strip()
-    msg = (
-        f"🔗 **رابط تفعيل رقمك جاهز:**\n\n"
-        f"{link}\n\n"
-        f"⚠️ يرجى الدخول إلى الرابط واتباع قواعد التفعيل لاستلام الكود."
-    )
-    try:
-        text, menu_kb = main_menu_text_and_kb(c_id, "")
-        await bot.send_message(c_id, msg, reply_markup=menu_kb)
-        await message.reply("✅ تم إرسال الرابط للزبون بنجاح.")
-        await state.clear()
-    except Exception as e:
-        await message.reply(f"⚠️ فشل الإرسال: {e}")
 
 @dp.callback_query(F.data == "sec_support")
 async def support_start(cb: types.CallbackQuery, state: FSMContext):
@@ -1131,7 +1146,8 @@ async def support_forward(message: types.Message, state: FSMContext):
     txt = (
         f"📩 **تذكرة دعم فني جديدة:**\n"
         f"👤 الزبون: @{message.from_user.username or 'بدون'} (`{message.from_user.id}`)\n\n"
-        f"📝 الرسالة:\n{message.text}"
+        f"📝 الرسالة:\n{message.text}\n\n"
+        f"💡 للرد على الزبون، قم بعمل رد (Reply) مباشر على هذه الرسالة."
     )
     await bot.send_message(GROUPS["support"], txt, parse_mode="Markdown")
     await state.clear()
@@ -1141,22 +1157,11 @@ async def support_forward(message: types.Message, state: FSMContext):
         reply_markup=menu_kb
     )
 
-@dp.message(F.chat.id == GROUPS["support"], F.reply_to_message)
-async def support_group_reply(message: types.Message):
-    orig = message.reply_to_message.text or message.reply_to_message.caption or ""
-    if "(`" in orig and "`)" in orig:
-        try:
-            cust_id = int(orig.split("(`")[1].split("`)")[0])
-            text, menu_kb = main_menu_text_and_kb(cust_id, "")
-            await bot.send_message(cust_id, f"💬 **رد الدعم الفني:**\n\n{message.text}", reply_markup=menu_kb)
-            await message.reply("✅ تم توصيل الرد للزبون.")
-        except Exception as e:
-            await message.reply(f"⚠️ فشل الإرسال: {e}")
-
-# أوامر الإدارة لتعديل الرصيد يدوياً
+# ----------------- أوامر الأدمن الأساسية -----------------
 @dp.message(Command("add_balance"))
 async def admin_add_bal(message: types.Message):
-    if message.from_user.id != ADMIN_ID: return
+    if message.from_user.id != ADMIN_ID:
+        return
     try:
         _, u_id, amt = message.text.split()
         update_user_balance(int(u_id), float(amt))
@@ -1166,7 +1171,8 @@ async def admin_add_bal(message: types.Message):
 
 @dp.message(Command("rate"))
 async def set_dollar(message: types.Message):
-    if message.from_user.id != ADMIN_ID: return
+    if message.from_user.id != ADMIN_ID:
+        return
     try:
         val = float(message.text.split()[1])
         update_setting("dollar_rate", val)
