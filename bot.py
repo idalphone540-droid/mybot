@@ -15,7 +15,7 @@ from aiogram.types import (
 )
 
 # ----------------- الإعدادات والمجموعات -----------------
-BOT_TOKEN = "8774564171:AAHqohfEpmorX9GLG32TXrZsnXoRNDu6ePs"
+BOT_TOKEN = "8774564171:AAE_kxJM-yZ97f52_dTGwnKTLyfvsARM5Ik"
 ADMIN_ID = 123456789  # آيدي الأدمن الأساسي
 
 CHANNEL_ID = -1004492385043
