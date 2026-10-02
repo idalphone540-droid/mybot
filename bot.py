@@ -1,10 +1,12 @@
 import asyncio
+import html
 import logging
 import os
-import uuid
-from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
-from pathlib import Path
+import random
+import re
+import string
+import time
+from typing import Optional, Tuple
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, types
@@ -14,31 +16,27 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 
-# ============================================================
-# Syria Store / Mays Online - Professional Foundation V2
-# ظ‚ط§ط¹ط¯ط© طھط´ط؛ظٹظ„ + ظ„ظˆط­ط© ط¥ط¯ط§ط±ط© ط¯ط§ط®ظ„ Telegram
-# ظ‡ط°ظ‡ ط§ظ„ظ†ط³ط®ط© ظ‡ظٹ ط§ظ„ط£ط³ط§ط³ ط§ظ„ط°ظٹ طھظڈط±ظƒظ‘ط¨ ظپظˆظ‚ظ‡ ط§ظ„ط®ط¯ظ…ط§طھ ط§ظ„ط£طµظ„ظٹط© ظ„ط§ط­ظ‚ط§ظ‹.
-# ============================================================
-
-BASE_DIR = Path(__file__).resolve().parent
+# =====================================================================
+# 1. الإعدادات والمتغيرات الأساسية
+# =====================================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID_RAW = os.getenv("ADMIN_ID")
-
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN ط؛ظٹط± ظ…ظˆط¬ظˆط¯ ظپظٹ ظ…طھط؛ظٹط±ط§طھ ط§ظ„ط¨ظٹط¦ط©.")
-if not ADMIN_ID_RAW:
-    raise RuntimeError("ADMIN_ID ط؛ظٹط± ظ…ظˆط¬ظˆط¯ ظپظٹ ظ…طھط؛ظٹط±ط§طھ ط§ظ„ط¨ظٹط¦ط©.")
-try:
-    ADMIN_ID = int(ADMIN_ID_RAW)
-except ValueError as exc:
-    raise RuntimeError("ADMIN_ID ظٹط¬ط¨ ط£ظ† ظٹظƒظˆظ† ط±ظ‚ظ… Telegram طµط­ظٹط­ط§ظ‹.") from exc
+    # ضع التوكن هنا أو مرره كمتغير بيئة
+    BOT_TOKEN = "8774564171:AAE_kxJM-yZ97f52_dTGwnKTLyfvsARM5Ik"
 
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "-1004492385043"))
-CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/SyriaStore_ch")
-DB_PATH = BASE_DIR / os.getenv("DB_NAME", "bot_store.db")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))  # ضع آيدي حسابك الحقيقي هنا
+CHANNEL_ID = -1004492385043
+CHANNEL_LINK = "https://t.me/SyriaStore_ch"
 
+# معرفات المجموعات لكل قسم
 GROUPS = {
     "wallet": -1003984372814,
     "balance": -1003745247353,
@@ -48,1516 +46,674 @@ GROUPS = {
     "support": -1004420804667,
 }
 
-GROUP_NAMES = {
-    "wallet": "ط§ظ„ظ…ط­ظپط¸ط© ظˆط§ظ„ظ…ط§ظ„ظٹط©",
-    "balance": "ط§ظ„ط±طµظٹط¯ ظˆط§ظ„ظƒط§ط´",
-    "games": "ط§ظ„ط£ظ„ط¹ط§ط¨",
-    "accounts": "ط§ظ„ط­ط³ط§ط¨ط§طھ ظˆط§ظ„ط§ط´طھط±ط§ظƒط§طھ",
-    "social": "ط§ظ„ط³ظˆط´ظٹط§ظ„ ظˆط§ظ„ط¥ط¹ظ„ط§ظ†ط§طھ",
-    "support": "ط§ظ„ط¯ط¹ظ… ط§ظ„ظپظ†ظٹ",
-}
+ALL_ADMIN_GROUPS = list(GROUPS.values())
 
-SHAM_NAME = "ط³ظƒظٹظ†ظ‡ ط­ظ…ظˆط¯ ط·ظ‡"
+SHAM_NAME = "سكينه حمود طه"
 SHAM_ADDR = "be03739e320f3dfd318a1a7faebae16a"
+QR_IMAGE_PATH = "qr_sham.jpg"
+DB_PATH = "syria_store_v2.db"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-logger = logging.getLogger("syria_store")
-
+logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 
+# قفل لمنع التزامن والسباق على مستوى الذاكرة
+wallet_locks = {}
 
-# ============================================================
-# Helpers
-# ============================================================
+def get_user_lock(user_id: int) -> asyncio.Lock:
+    if user_id not in wallet_locks:
+        wallet_locks[user_id] = asyncio.Lock()
+    return wallet_locks[user_id]
 
-def now_utc() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+# دالة توليد معرفات فريدة
+def generate_uid(prefix: str = "ORD") -> str:
+    suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    return f"{prefix}-{int(time.time()) % 1000000:06d}-{suffix}"
 
-
-def money(value: int) -> str:
-    return f"{int(value):,} ظ„.ط³"
-
-
-def parse_money(value) -> int:
-    try:
-        amount = Decimal(str(value).replace(",", "").strip())
-    except (InvalidOperation, ValueError):
-        raise ValueError("ط§ظ„ظ…ط¨ظ„ط؛ ط؛ظٹط± طµط­ظٹط­.")
-    if amount <= 0 or amount != amount.to_integral_value():
-        raise ValueError("ط§ظ„ظ…ط¨ظ„ط؛ ظٹط¬ط¨ ط£ظ† ظٹظƒظˆظ† ط±ظ‚ظ…ط§ظ‹ طµط­ظٹط­ط§ظ‹ ظ…ظˆط¬ط¨ط§ظ‹.")
-    return int(amount)
-
-
-def esc(value) -> str:
-    # aiogram HTML mode needs explicit escaping for user-supplied text.
-    import html
-    return html.escape(str(value or ""))
-
-
-def new_order_no() -> str:
-    return "ORD-" + uuid.uuid4().hex[:10].upper()
-
-
-def new_payment_no() -> str:
-    return "PAY-" + uuid.uuid4().hex[:10].upper()
-
-
-# ============================================================
-# Database
-# ============================================================
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    username TEXT,
-    first_name TEXT,
-    balance INTEGER NOT NULL DEFAULT 0,
-    is_vip INTEGER NOT NULL DEFAULT 0,
-    is_blocked INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS orders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    order_no TEXT NOT NULL UNIQUE,
-    user_id INTEGER NOT NULL,
-    section TEXT NOT NULL,
-    service TEXT NOT NULL,
-    target TEXT,
-    quantity TEXT,
-    price INTEGER,
-    payment_method TEXT,
-    status TEXT NOT NULL DEFAULT 'pending_payment',
-    admin_group_id INTEGER,
-    admin_message_id INTEGER,
-    admin_note TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY(user_id) REFERENCES users(user_id)
-);
-CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id);
-CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
-CREATE INDEX IF NOT EXISTS idx_orders_group ON orders(admin_group_id);
-
-CREATE TABLE IF NOT EXISTS payments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    payment_no TEXT NOT NULL UNIQUE,
-    user_id INTEGER NOT NULL,
-    order_id INTEGER,
-    amount INTEGER NOT NULL,
-    method TEXT NOT NULL,
-    reference TEXT,
-    receipt_file_id TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
-    reviewed_by INTEGER,
-    reviewed_at TEXT,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY(user_id) REFERENCES users(user_id),
-    FOREIGN KEY(order_id) REFERENCES orders(id)
-);
-CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
-CREATE INDEX IF NOT EXISTS idx_payments_order ON payments(order_id);
-CREATE INDEX IF NOT EXISTS idx_payment_reference ON payments(method,reference);
-
-CREATE TABLE IF NOT EXISTS wallet_ledger (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    order_id INTEGER,
-    payment_id INTEGER,
-    amount INTEGER NOT NULL,
-    balance_after INTEGER NOT NULL,
-    type TEXT NOT NULL,
-    note TEXT,
-    created_at TEXT NOT NULL,
-    UNIQUE(payment_id, type)
-);
-CREATE INDEX IF NOT EXISTS idx_ledger_user ON wallet_ledger(user_id);
-
-CREATE TABLE IF NOT EXISTS admin_actions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    admin_id INTEGER NOT NULL,
-    action TEXT NOT NULL,
-    order_id INTEGER,
-    payment_id INTEGER,
-    details TEXT,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS staff (
-    user_id INTEGER PRIMARY KEY,
-    role TEXT NOT NULL DEFAULT 'staff',
-    active INTEGER NOT NULL DEFAULT 1,
-    added_by INTEGER,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_staff_active ON staff(active);
-"""
-
-DEFAULT_SETTINGS = {
-    "dollar_rate": "150",
-    "num_whatsapp": "400",
-    "num_telegram": "300",
-}
-
-
-async def db_connect():
-    db = await aiosqlite.connect(DB_PATH, timeout=10)
-    db.row_factory = aiosqlite.Row
-    await db.execute("PRAGMA foreign_keys=ON")
-    await db.execute("PRAGMA busy_timeout=10000")
-    return db
-
-
-async def fetchone(db, sql, params=()):
-    cursor = await db.execute(sql, params)
-    try:
-        return await cursor.fetchone()
-    finally:
-        await cursor.close()
-
-
-async def fetchall(db, sql, params=()):
-    cursor = await db.execute(sql, params)
-    try:
-        return await cursor.fetchall()
-    finally:
-        await cursor.close()
-
-
+# =====================================================================
+# 2. طبقة قاعدة البيانات والدفتر المحاسبي (Database & Ledger)
+# =====================================================================
 async def init_db():
-    async with await db_connect() as db:
-        await db.execute("PRAGMA journal_mode=WAL")
-        await db.executescript(SCHEMA)
-        for key, value in DEFAULT_SETTINGS.items():
-            await db.execute(
-                "INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?,?,?)",
-                (key, value, now_utc()),
-            )
-        # ط§ظ„ظ…ط¯ظٹط± ط§ظ„ط±ط¦ظٹط³ظٹ ط¯ط§ط¦ظ…ط§ظ‹ ظ…ظˆط¬ظˆط¯ ظپظٹ ط¬ط¯ظˆظ„ ط§ظ„ظ…ظˆط¸ظپظٹظ† ط¨طµظ„ط§ط­ظٹط© owner.
-        await db.execute(
-            """
-            INSERT INTO staff(user_id,role,active,added_by,created_at,updated_at)
-            VALUES(?,?,?,?,?,?)
-            ON CONFLICT(user_id) DO UPDATE SET role='owner', active=1, updated_at=excluded.updated_at
-            """,
-            (ADMIN_ID, "owner", 1, ADMIN_ID, now_utc(), now_utc()),
-        )
-        await db.commit()
-    logger.info("Database ready: %s", DB_PATH)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode = WAL;")
+        await db.execute("PRAGMA foreign_keys = ON;")
 
+        # 1. جدول المستخدمين
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            full_name TEXT,
+            balance INTEGER DEFAULT 0 CHECK(balance >= 0),
+            is_vip INTEGER DEFAULT 0,
+            is_banned INTEGER DEFAULT 0,
+            role TEXT DEFAULT 'USER' CHECK(role IN ('USER', 'STAFF', 'ADMIN')),
+            staff_department TEXT DEFAULT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
 
-# ============================================================
-# Users / staff / permissions
-# ============================================================
+        # 2. جدول الطلبات الموحد
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            order_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            department TEXT NOT NULL,
+            service_name TEXT NOT NULL,
+            target_data TEXT NOT NULL,
+            price INTEGER NOT NULL CHECK(price >= 0),
+            status TEXT DEFAULT 'PENDING_PAYMENT' CHECK(status IN ('PENDING_PAYMENT', 'PROCESSING', 'COMPLETED', 'REJECTED', 'REFUNDED')),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(user_id)
+        );
+        """)
 
-async def ensure_user(user_id: int, username: str | None = None, first_name: str | None = None):
-    async with await db_connect() as db:
-        row = await fetchone(db, "SELECT user_id FROM users WHERE user_id=?", (user_id,))
-        timestamp = now_utc()
-        if row is None:
-            await db.execute(
-                """INSERT INTO users(user_id,username,first_name,balance,is_vip,is_blocked,created_at,updated_at)
-                   VALUES(?,?,?,0,0,0,?,?)""",
-                (user_id, username, first_name, timestamp, timestamp),
-            )
-        else:
-            await db.execute(
-                "UPDATE users SET username=?, first_name=?, updated_at=? WHERE user_id=?",
-                (username, first_name, timestamp, user_id),
-            )
-        await db.commit()
+        # 3. جدول المدفوعات والشام كاش
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            payment_id TEXT PRIMARY KEY,
+            order_id TEXT,
+            user_id INTEGER NOT NULL,
+            method TEXT NOT NULL,
+            amount INTEGER NOT NULL CHECK(amount > 0),
+            sham_tx_id TEXT UNIQUE,
+            receipt_file_id TEXT,
+            status TEXT DEFAULT 'UNDER_REVIEW' CHECK(status IN ('UNDER_REVIEW', 'ACCEPTED', 'DECLINED')),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(order_id) REFERENCES orders(order_id),
+            FOREIGN KEY(user_id) REFERENCES users(user_id)
+        );
+        """)
 
+        # 4. الدفتر المحاسبي للمحفظة (Ledger)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS wallet_ledger (
+            ledger_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            reference_id TEXT NOT NULL,
+            type TEXT NOT NULL CHECK(type IN ('DEPOSIT', 'PURCHASE', 'REFUND', 'ADJUSTMENT')),
+            amount INTEGER NOT NULL,
+            balance_after INTEGER NOT NULL,
+            note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(user_id)
+        );
+        """)
 
-async def get_user(user_id: int):
-    async with await db_connect() as db:
-        return await fetchone(db, "SELECT * FROM users WHERE user_id=?", (user_id,))
-
-
-async def set_blocked(user_id: int, blocked: bool):
-    async with await db_connect() as db:
-        await db.execute(
-            "UPDATE users SET is_blocked=?, updated_at=? WHERE user_id=?",
-            (1 if blocked else 0, now_utc(), user_id),
-        )
-        await db.commit()
-
-
-async def get_staff_role(user_id: int):
-    if user_id == ADMIN_ID:
-        return "owner"
-    async with await db_connect() as db:
-        row = await fetchone(db, "SELECT role FROM staff WHERE user_id=? AND active=1", (user_id,))
-        return row["role"] if row else None
-
-
-async def is_staff(user_id: int) -> bool:
-    return (await get_staff_role(user_id)) is not None
-
-
-async def staff_can_section(user_id: int, section: str) -> bool:
-    role = await get_staff_role(user_id)
-    if role in {"owner", "staff"}:
-        return role is not None
-    return role == section
-
-
-async def is_owner(user_id: int) -> bool:
-    return user_id == ADMIN_ID
-
-
-async def add_staff(user_id: int, role: str, added_by: int):
-    if user_id == ADMIN_ID:
-        return False
-    async with await db_connect() as db:
-        await db.execute(
-            """
-            INSERT INTO staff(user_id,role,active,added_by,created_at,updated_at)
-            VALUES(?,?,1,?,?,?)
-            ON CONFLICT(user_id) DO UPDATE SET role=excluded.role,active=1,updated_at=excluded.updated_at
-            """,
-            (user_id, role, added_by, now_utc(), now_utc()),
-        )
-        await db.commit()
-    return True
-
-
-async def remove_staff(user_id: int):
-    if user_id == ADMIN_ID:
-        return False
-    async with await db_connect() as db:
-        await db.execute("UPDATE staff SET active=0, updated_at=? WHERE user_id=?", (now_utc(), user_id))
-        await db.commit()
-    return True
-
-
-async def get_staff():
-    async with await db_connect() as db:
-        return await fetchall(
-            db,
-            "SELECT user_id,role,active,created_at FROM staff ORDER BY active DESC, created_at DESC",
-        )
-
-
-async def can_manage_panel(user_id: int) -> bool:
-    return await is_staff(user_id)
-
-
-# ============================================================
-# Settings
-# ============================================================
-
-async def get_setting(key: str, default=None):
-    async with await db_connect() as db:
-        row = await fetchone(db, "SELECT value FROM settings WHERE key=?", (key,))
-    return row["value"] if row else default
-
-
-async def set_setting(key: str, value):
-    async with await db_connect() as db:
-        await db.execute(
-            """
-            INSERT INTO settings(key,value,updated_at) VALUES(?,?,?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at
-            """,
-            (key, str(value), now_utc()),
-        )
+        # 5. الإعدادات
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            val REAL
+        );
+        """)
+        await db.execute("INSERT OR IGNORE INTO settings (key, val) VALUES ('dollar_rate', 150.0);")
         await db.commit()
 
+# =====================================================================
+# 3. خدمات المحفظة والعمليات المالية الذرية (Wallet Service)
+# =====================================================================
+class WalletService:
+    @staticmethod
+    async def get_or_create_user(user_id: int, username: str = "", full_name: str = ""):
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("SELECT user_id, username, balance, is_vip, is_banned, role, staff_department FROM users WHERE user_id=?", (user_id,))
+            row = await cursor.fetchone()
+            if not row:
+                role = "ADMIN" if user_id == ADMIN_ID else "USER"
+                await db.execute(
+                    "INSERT INTO users (user_id, username, full_name, role) VALUES (?, ?, ?, ?)",
+                    (user_id, username, full_name, role)
+                )
+                await db.commit()
+                return (user_id, username, 0, 0, 0, role, None)
+            return row
 
-# ============================================================
-# Wallet - all balance changes are atomic and logged
-# ============================================================
-
-async def wallet_credit(user_id: int, amount: int, movement_type: str, note: str = "", payment_id=None, order_id=None):
-    if amount <= 0:
-        return False
-    async with await db_connect() as db:
-        await db.execute("BEGIN IMMEDIATE")
-        user = await fetchone(db, "SELECT balance FROM users WHERE user_id=?", (user_id,))
-        if not user:
-            await db.rollback()
+    @staticmethod
+    async def deposit(user_id: int, amount: int, ref_id: str, note: str = "") -> bool:
+        """إيداع رصيد بالمحفظة وتسجيل قيد في الـ Ledger"""
+        if amount <= 0:
             return False
-        if payment_id is not None:
-            duplicate = await fetchone(
-                db,
-                "SELECT id FROM wallet_ledger WHERE payment_id=? AND type=?",
-                (payment_id, movement_type),
-            )
-            if duplicate:
-                await db.rollback()
-                return False
-        new_balance = int(user["balance"]) + amount
-        await db.execute(
-            "UPDATE users SET balance=?,updated_at=? WHERE user_id=?",
-            (new_balance, now_utc(), user_id),
-        )
-        await db.execute(
-            """INSERT INTO wallet_ledger(user_id,order_id,payment_id,amount,balance_after,type,note,created_at)
-               VALUES(?,?,?,?,?,?,?,?)""",
-            (user_id, order_id, payment_id, amount, new_balance, movement_type, note, now_utc()),
-        )
-        await db.commit()
-        return True
+        async with get_user_lock(user_id):
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("BEGIN IMMEDIATE TRANSACTION;")
+                try:
+                    await db.execute("UPDATE users SET balance = balance + ?, is_vip = 1 WHERE user_id = ?", (amount, user_id))
+                    cursor = await db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+                    new_bal = (await cursor.fetchone())[0]
 
-
-async def wallet_debit(user_id: int, amount: int, movement_type: str, note: str = "", order_id=None):
-    if amount <= 0:
-        return False
-    async with await db_connect() as db:
-        await db.execute("BEGIN IMMEDIATE")
-        user = await fetchone(db, "SELECT balance FROM users WHERE user_id=?", (user_id,))
-        if not user or int(user["balance"]) < amount:
-            await db.rollback()
-            return False
-        new_balance = int(user["balance"]) - amount
-        cursor = await db.execute(
-            "UPDATE users SET balance=?,updated_at=? WHERE user_id=? AND balance>=?",
-            (new_balance, now_utc(), user_id, amount),
-        )
-        if cursor.rowcount != 1:
-            await db.rollback()
-            return False
-        await db.execute(
-            """INSERT INTO wallet_ledger(user_id,order_id,amount,balance_after,type,note,created_at)
-               VALUES(?,?,?,?,?,?,?)""",
-            (user_id, order_id, -amount, new_balance, movement_type, note, now_utc()),
-        )
-        await db.commit()
-        return True
-
-
-# ============================================================
-# Orders / payments
-# ============================================================
-
-ORDER_STATUSES = {
-    "pending_payment": "ط¨ط§ظ†طھط¸ط§ط± ط§ظ„ط¯ظپط¹",
-    "payment_review": "ظ…ط±ط§ط¬ط¹ط© ط§ظ„ط¯ظپط¹",
-    "paid": "طھظ… ط§ظ„ط¯ظپط¹",
-    "processing": "ظ‚ظٹط¯ ط§ظ„طھظ†ظپظٹط°",
-    "completed": "ظ…ظƒطھظ…ظ„",
-    "rejected": "ظ…ط±ظپظˆط¶",
-    "cancelled": "ظ…ظ„ط؛ظٹ",
-    "refunded": "ظ…ط³طھط±ط¬ط¹",
-}
-
-
-async def create_order(user_id: int, section: str, service: str, target="", quantity="", price=0):
-    user = await get_user(user_id)
-    if not user:
-        raise ValueError("ط§ظ„ظ…ط³طھط®ط¯ظ… ط؛ظٹط± ظ…ظˆط¬ظˆط¯.")
-    if int(user["is_blocked"]) == 1:
-        raise PermissionError("ط§ظ„ظ…ط³طھط®ط¯ظ… ظ…ظˆظ‚ظˆظپ.")
-    if price <= 0:
-        raise ValueError("ط³ط¹ط± ط§ظ„ط·ظ„ط¨ ط؛ظٹط± طµط­ظٹط­.")
-    group_id = GROUPS.get(section)
-    if group_id is None:
-        raise ValueError("ط§ظ„ظ‚ط³ظ… ط؛ظٹط± ظ…ط±طھط¨ط· ط¨ظ…ط¬ظ…ظˆط¹ط© ط¥ط¯ط§ط±ط©.")
-    order_no = new_order_no()
-    async with await db_connect() as db:
-        cursor = await db.execute(
-            """INSERT INTO orders(order_no,user_id,section,service,target,quantity,price,status,admin_group_id,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,'pending_payment',?,?,?)""",
-            (order_no, user_id, section, service, target, quantity, price, group_id, now_utc(), now_utc()),
-        )
-        order_id = cursor.lastrowid
-        await db.commit()
-    return int(order_id), order_no
-
-
-async def get_order(order_id: int):
-    async with await db_connect() as db:
-        return await fetchone(db, "SELECT * FROM orders WHERE id=?", (order_id,))
-
-
-async def get_order_by_no(order_no: str):
-    async with await db_connect() as db:
-        return await fetchone(db, "SELECT * FROM orders WHERE order_no=?", (order_no,))
-
-
-async def set_order_status(order_id: int, status: str, note=None):
-    if status not in ORDER_STATUSES:
-        raise ValueError("ط­ط§ظ„ط© ط؛ظٹط± طµط­ظٹط­ط©.")
-    async with await db_connect() as db:
-        await db.execute(
-            "UPDATE orders SET status=?,admin_note=COALESCE(?,admin_note),updated_at=? WHERE id=?",
-            (status, note, now_utc(), order_id),
-        )
-        await db.commit()
-
-
-async def attach_admin_message(order_id: int, group_id: int, message_id: int):
-    async with await db_connect() as db:
-        await db.execute(
-            "UPDATE orders SET admin_group_id=?,admin_message_id=?,updated_at=? WHERE id=?",
-            (group_id, message_id, now_utc(), order_id),
-        )
-        await db.commit()
-
-
-async def create_payment(user_id: int, order_id: int, amount: int, method: str, reference="", receipt_file_id=""):
-    payment_no = new_payment_no()
-    async with await db_connect() as db:
-        order = await fetchone(db, "SELECT * FROM orders WHERE id=?", (order_id,))
-        if not order or int(order["user_id"]) != user_id:
-            raise ValueError("ط§ظ„ط·ظ„ط¨ ط؛ظٹط± طµط§ظ„ط­.")
-        if order["status"] in {"cancelled", "rejected", "completed", "refunded"}:
-            raise ValueError("ظ„ط§ ظٹظ…ظƒظ† ط§ظ„ط¯ظپط¹ ظ„ظ‡ط°ط§ ط§ظ„ط·ظ„ط¨.")
-        if reference:
-            duplicate_reference = await fetchone(
-                db,
-                "SELECT id FROM payments WHERE method=? AND reference=? LIMIT 1",
-                (method, reference),
-            )
-            if duplicate_reference:
-                raise ValueError("ط±ظ‚ظ… ط¹ظ…ظ„ظٹط© ط§ظ„ط¯ظپط¹ ظ…ط³طھط®ط¯ظ… ظ…ط³ط¨ظ‚ط§ظ‹.")
-        cursor = await db.execute(
-            """INSERT INTO payments(payment_no,user_id,order_id,amount,method,reference,receipt_file_id,status,created_at)
-               VALUES(?,?,?,?,?,?,?,'pending',?)""",
-            (payment_no, user_id, order_id, amount, method, reference, receipt_file_id, now_utc()),
-        )
-        payment_id = cursor.lastrowid
-        await db.execute("UPDATE orders SET status='payment_review',payment_method=?,updated_at=? WHERE id=?", (method, now_utc(), order_id))
-        await db.commit()
-    return int(payment_id), payment_no
-
-
-async def get_payment(payment_id: int):
-    async with await db_connect() as db:
-        return await fetchone(db, "SELECT * FROM payments WHERE id=?", (payment_id,))
-
-
-async def review_payment(payment_id: int, admin_id: int, approve: bool):
-    async with await db_connect() as db:
-        await db.execute("BEGIN IMMEDIATE")
-        payment = await fetchone(db, "SELECT * FROM payments WHERE id=?", (payment_id,))
-        if not payment:
-            await db.rollback()
-            return False, "payment_not_found", None
-        if payment["status"] != "pending":
-            await db.rollback()
-            return False, "already_reviewed", payment
-
-        order = await fetchone(db, "SELECT * FROM orders WHERE id=?", (payment["order_id"],))
-        if not order:
-            await db.rollback()
-            return False, "order_not_found", payment
-
-        new_payment_status = "approved" if approve else "rejected"
-        await db.execute(
-            "UPDATE payments SET status=?,reviewed_by=?,reviewed_at=? WHERE id=? AND status='pending'",
-            (new_payment_status, admin_id, now_utc(), payment_id),
-        )
-
-        if approve:
-            if order["section"] == "wallet":
-                user = await fetchone(db, "SELECT balance FROM users WHERE user_id=?", (payment["user_id"],))
-                if not user:
+                    await db.execute(
+                        "INSERT INTO wallet_ledger (user_id, reference_id, type, amount, balance_after, note) VALUES (?, ?, 'DEPOSIT', ?, ?, ?)",
+                        (user_id, ref_id, amount, new_bal, note)
+                    )
+                    await db.commit()
+                    return True
+                except Exception as e:
                     await db.rollback()
-                    return False, "user_not_found", payment
-                new_balance = int(user["balance"]) + int(payment["amount"])
-                await db.execute(
-                    "UPDATE users SET balance=?,is_vip=1,updated_at=? WHERE user_id=?",
-                    (new_balance, now_utc(), payment["user_id"]),
-                )
-                await db.execute(
-                    """INSERT INTO wallet_ledger(user_id,order_id,payment_id,amount,balance_after,type,note,created_at)
-                       VALUES(?,?,?,?,?,?,?,?)""",
-                    (payment["user_id"], payment["order_id"], payment_id, int(payment["amount"]), new_balance, "deposit", "طھط£ظƒظٹط¯ ط¥ظٹط¯ط§ط¹ ظ…ط­ظپط¸ط©", now_utc()),
-                )
-            await db.execute("UPDATE orders SET status='paid',updated_at=? WHERE id=?", (now_utc(), payment["order_id"]))
-        else:
-            await db.execute("UPDATE orders SET status='rejected',updated_at=? WHERE id=?", (now_utc(), payment["order_id"]))
+                    logging.error(f"Deposit error: {e}")
+                    return False
 
-        await db.execute(
-            "INSERT INTO admin_actions(admin_id,action,order_id,payment_id,details,created_at) VALUES(?,?,?,?,?,?)",
-            (admin_id, new_payment_status, payment["order_id"], payment_id, "ظ…ط±ط§ط¬ط¹ط© ط¯ظپط¹ط©", now_utc()),
-        )
-        await db.commit()
-        return True, new_payment_status, payment
-
-
-async def mark_order_processing(order_id: int, admin_id: int):
-    async with await db_connect() as db:
-        await db.execute("BEGIN IMMEDIATE")
-        order = await fetchone(db, "SELECT * FROM orders WHERE id=?", (order_id,))
-        if not order:
-            await db.rollback()
-            return False, None
-        if order["status"] not in {"paid", "processing"}:
-            await db.rollback()
-            return False, order
-        await db.execute("UPDATE orders SET status='processing',updated_at=? WHERE id=?", (now_utc(), order_id))
-        await db.execute(
-            "INSERT INTO admin_actions(admin_id,action,order_id,details,created_at) VALUES(?,?,?,?,?)",
-            (admin_id, "processing", order_id, "ط¨ط¯ط، طھظ†ظپظٹط° ط§ظ„ط·ظ„ط¨", now_utc()),
-        )
-        await db.commit()
-        return True, order
-
-
-async def finish_order(order_id: int, admin_id: int):
-    async with await db_connect() as db:
-        await db.execute("BEGIN IMMEDIATE")
-        order = await fetchone(db, "SELECT * FROM orders WHERE id=?", (order_id,))
-        if not order or order["status"] not in {"paid", "processing"}:
-            await db.rollback()
-            return False, order
-        await db.execute("UPDATE orders SET status='completed',updated_at=? WHERE id=?", (now_utc(), order_id))
-        await db.execute(
-            "INSERT INTO admin_actions(admin_id,action,order_id,details,created_at) VALUES(?,?,?,?,?)",
-            (admin_id, "completed", order_id, "ط¥ظƒظ…ط§ظ„ ط§ظ„ط·ظ„ط¨", now_utc()),
-        )
-        await db.commit()
-        return True, order
-
-
-async def cancel_order(order_id: int, user_id: int):
-    async with await db_connect() as db:
-        await db.execute("BEGIN IMMEDIATE")
-        order = await fetchone(db, "SELECT * FROM orders WHERE id=?", (order_id,))
-        if not order or int(order["user_id"]) != user_id or order["status"] != "pending_payment":
-            await db.rollback()
+    @staticmethod
+    async def deduct_for_order(user_id: int, order_id: str, amount: int) -> bool:
+        """خصم آمن وذري لشراء خدمة مع تسجيل القيد"""
+        if amount <= 0:
             return False
-        await db.execute("UPDATE orders SET status='cancelled',updated_at=? WHERE id=?", (now_utc(), order_id))
-        await db.commit()
-        return True
+        async with get_user_lock(user_id):
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("BEGIN IMMEDIATE TRANSACTION;")
+                try:
+                    cursor = await db.execute(
+                        "UPDATE users SET balance = balance - ? WHERE user_id = ? AND balance >= ?",
+                        (amount, user_id, amount)
+                    )
+                    if cursor.rowcount == 0:
+                        await db.rollback()
+                        return False
 
+                    cursor = await db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+                    new_bal = (await cursor.fetchone())[0]
 
-# ============================================================
-# Subscription / user UI
-# ============================================================
+                    await db.execute(
+                        "INSERT INTO wallet_ledger (user_id, reference_id, type, amount, balance_after, note) VALUES (?, ?, 'PURCHASE', ?, ?, 'شراء خدمة')",
+                        (user_id, order_id, -amount, new_bal)
+                    )
+                    await db.execute("UPDATE orders SET status = 'PROCESSING' WHERE order_id = ?", (order_id,))
+                    await db.commit()
+                    return True
+                except Exception as e:
+                    await db.rollback()
+                    logging.error(f"Deduct error: {e}")
+                    return False
 
-async def is_subscribed(user_id: int) -> bool:
-    try:
-        member = await bot.get_chat_member(CHANNEL_ID, user_id)
-        return member.status not in {"left", "kicked"}
-    except Exception:
-        logger.exception("Subscription check failed")
-        return False
+    @staticmethod
+    async def refund(order_id: str) -> Tuple[bool, int, int]:
+        """استرجاع مبلغ طلب ملغي للمحفظة فوراً"""
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("SELECT user_id, price, status FROM orders WHERE order_id = ?", (order_id,))
+            order = await cursor.fetchone()
+            if not order or order[2] in ['REFUNDED', 'REJECTED']:
+                return False, 0, 0
 
+            user_id, price = order[0], order[1]
+            async with get_user_lock(user_id):
+                await db.execute("BEGIN IMMEDIATE TRANSACTION;")
+                try:
+                    await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (price, user_id))
+                    cursor = await db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+                    new_bal = (await cursor.fetchone())[0]
 
-def subscription_keyboard():
+                    await db.execute(
+                        "INSERT INTO wallet_ledger (user_id, reference_id, type, amount, balance_after, note) VALUES (?, ?, 'REFUND', ?, ?, 'استرجاع قيمة طلب')",
+                        (user_id, order_id, price, new_bal)
+                    )
+                    await db.execute("UPDATE orders SET status = 'REFUNDED' WHERE order_id = ?", (order_id,))
+                    await db.commit()
+                    return True, user_id, price
+                except Exception as e:
+                    await db.rollback()
+                    logging.error(f"Refund error: {e}")
+                    return False, 0, 0
+
+# =====================================================================
+# 4. الحالات FSM
+# =====================================================================
+class ClientOrder(StatesGroup):
+    inputting_data = State()
+    manual_receipt = State()
+
+class WalletFlow(StatesGroup):
+    amount = State()
+    receipt = State()
+    tx_code = State()
+
+class AdminFlow(StatesGroup):
+    broadcast = State()
+    edit_rate = State()
+    add_balance_user = State()
+    add_balance_amt = State()
+
+# =====================================================================
+# 5. واجهة العميل (Client Interface)
+# =====================================================================
+def client_main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="ًں“¢ ط§ظ„ط§ط´طھط±ط§ظƒ ظپظٹ ط§ظ„ظ‚ظ†ط§ط©", url=CHANNEL_LINK)],
-        [InlineKeyboardButton(text="ًں”„ طھط­ظ‚ظ‚ ظ…ظ† ط§ظ„ط§ط´طھط±ط§ظƒ", callback_data="check_subscription")],
+        [InlineKeyboardButton(text="📞 قسم الرصيد والكاش", callback_data="sec:balance")],
+        [InlineKeyboardButton(text="🎮 قسم شحن الألعاب", callback_data="sec:games")],
+        [InlineKeyboardButton(text="💬 قسم تطبيقات الشات", callback_data="sec:chat")],
+        [InlineKeyboardButton(text="📦 قسم الحسابات الجاهزة", callback_data="sec:accounts")],
+        [InlineKeyboardButton(text="🚀 قسم السوشيال ميديا", callback_data="sec:social")],
+        [InlineKeyboardButton(text="💳 المحفظة والشحن", callback_data="client:wallet")],
+        [InlineKeyboardButton(text="🛠 الدعم الفني", callback_data="sec:support")]
     ])
-
-
-def user_main_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="ًں“‍ ط§ظ„ط±طµظٹط¯ ظˆط§ظ„ظƒط§ط´", callback_data="sec_balance")],
-        [InlineKeyboardButton(text="ًںژ® ط´ط­ظ† ط§ظ„ط£ظ„ط¹ط§ط¨", callback_data="sec_games")],
-        [InlineKeyboardButton(text="ًں’¬ طھط·ط¨ظٹظ‚ط§طھ ط§ظ„ط´ط§طھ", callback_data="sec_chat")],
-        [InlineKeyboardButton(text="ًں“¦ ط§ظ„ط­ط³ط§ط¨ط§طھ ظˆط§ظ„ط§ط´طھط±ط§ظƒط§طھ", callback_data="sec_accounts")],
-        [InlineKeyboardButton(text="ًںڑ€ ط§ظ„ط³ظˆط´ظٹط§ظ„ ظˆط§ظ„ط¥ط¹ظ„ط§ظ†ط§طھ", callback_data="sec_social")],
-        [InlineKeyboardButton(text="ًں“± ط£ط±ظ‚ط§ظ… ط§ظ„طھظپط¹ظٹظ„", callback_data="sec_numbers")],
-        [InlineKeyboardButton(text="ًں’³ ظ…ط­ظپط¸طھظٹ", callback_data="sec_wallet")],
-        [InlineKeyboardButton(text="ًں›  ط§ظ„ط¯ط¹ظ… ط§ظ„ظپظ†ظٹ", callback_data="sec_support")],
-    ])
-
-
-async def user_home_text(user_id: int):
-    user = await get_user(user_id)
-    balance = int(user["balance"]) if user else 0
-    vip = bool(user and int(user["is_vip"]) == 1)
-    return (
-        "ًں‘‹ <b>ط£ظ‡ظ„ط§ظ‹ ط¨ظƒ ظپظٹ Syria Store</b>\n"
-        "â”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\n"
-        f"ًںڈ· <b>ط§ظ„ط±طھط¨ط©:</b> {'ًںŒں ط²ط¨ظˆظ† ط¯ط§ط¦ظ… (VIP)' if vip else 'ًں‘¤ ط²ط¨ظˆظ† ط¹ط§ط¯ظٹ'}\n"
-        f"ًں’³ <b>ط§ظ„ط±طµظٹط¯:</b> {money(balance)}\n"
-        "â”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\n"
-        "ط§ط®طھط± ط§ظ„ظ‚ط³ظ… ط§ظ„ظ…ط·ظ„ظˆط¨:"
-    )
-
 
 @dp.message(CommandStart())
+@dp.message(F.text == "📋 القائمة الرئيسية")
 async def start_handler(message: types.Message, state: FSMContext):
     await state.clear()
-    await ensure_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-    user = await get_user(message.from_user.id)
-    if user and int(user["is_blocked"]) == 1:
-        await message.answer("â›” ط­ط³ط§ط¨ظƒ ظ…ظˆظ‚ظˆظپ ط­ط§ظ„ظٹط§ظ‹. طھظˆط§طµظ„ ظ…ط¹ ط§ظ„ط¥ط¯ط§ط±ط©.")
+    u = await WalletService.get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    if u[4] == 1:
+        await message.answer("⛔ حسابك محظور من استخدام البوت.")
         return
-    if not await is_subscribed(message.from_user.id):
-        await message.answer("âڑ ï¸ڈ ظٹط¬ط¨ ط§ظ„ط§ط´طھط±ط§ظƒ ظپظٹ ط§ظ„ظ‚ظ†ط§ط© ط§ظ„ط±ط³ظ…ظٹط© ط£ظˆظ„ط§ظ‹.", reply_markup=subscription_keyboard())
-        return
-    await message.answer(await user_home_text(message.from_user.id), reply_markup=user_main_keyboard())
 
+    rank = "🌟 زبون دائم (VIP)" if u[3] == 1 else "👤 زبون عادي"
+    text = (
+        f"👋 <b>مرحباً بك في سوريا ستور (Syria Store)</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🏷 <b>الرتبة:</b> {rank}\n"
+        f"💰 <b>رصيد المحفظة:</b> <code>{u[2]:,} ل.س</code>\n"
+        f"🆔 <b>معرّفك:</b> <code>{u[0]}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"اختر القسم المطلوب للبدء فوراً:"
+    )
+    kb = client_main_kb()
+    await message.answer(text, reply_markup=kb)
 
-@dp.callback_query(F.data == "check_subscription")
-async def check_subscription(callback: types.CallbackQuery):
-    if not await is_subscribed(callback.from_user.id):
-        await callback.answer("â‌Œ ظ„ظ… ظٹطھظ… ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ ط§ط´طھط±ط§ظƒظƒ ط¨ط¹ط¯.", show_alert=True)
-        return
-    await callback.answer("âœ… طھظ… ط§ظ„طھط­ظ‚ظ‚.")
-    await callback.message.edit_text(await user_home_text(callback.from_user.id), reply_markup=user_main_keyboard())
-
-
-@dp.callback_query(F.data == "back_main")
-async def back_main(callback: types.CallbackQuery, state: FSMContext):
+# ----------------- دورة شحن المحفظة -----------------
+@dp.callback_query(F.data == "client:wallet")
+async def wallet_home(cb: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text(await user_home_text(callback.from_user.id), reply_markup=user_main_keyboard())
-
-
-# ============================================================
-# Admin Panel
-# ============================================================
-
-class AdminState(StatesGroup):
-    search_user = State()
-    set_setting = State()
-    add_staff_id = State()
-    add_staff_role = State()
-    broadcast_text = State()
-    order_lookup = State()
-    balance_user_id = State()
-    balance_amount = State()
-    block_user_id = State()
-
-
-def admin_main_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="ًں“¦ ط§ظ„ط·ظ„ط¨ط§طھ", callback_data="adm:orders"), InlineKeyboardButton(text="ًں’³ ط§ظ„ظ…ط¯ظپظˆط¹ط§طھ", callback_data="adm:payments")],
-        [InlineKeyboardButton(text="ًں‘¥ ط§ظ„ظ…ط³طھط®ط¯ظ…ظˆظ†", callback_data="adm:users"), InlineKeyboardButton(text="ًں“ٹ ط§ظ„ط¥ط­طµط§ط¦ظٹط§طھ", callback_data="adm:stats")],
-        [InlineKeyboardButton(text="ًں’° ط¥ط¯ط§ط±ط© ط§ظ„ط£ط±طµط¯ط©", callback_data="adm:balance"), InlineKeyboardButton(text="ًں’µ ط§ظ„ط£ط³ط¹ط§ط± ظˆط§ظ„ط¥ط¹ط¯ط§ط¯ط§طھ", callback_data="adm:settings")],
-        [InlineKeyboardButton(text="ًں‘¨â€چًں’¼ ط§ظ„ظ…ظˆط¸ظپظˆظ†", callback_data="adm:staff"), InlineKeyboardButton(text="ًں“¢ ط¥ط¹ظ„ط§ظ† ط¬ظ…ط§ط¹ظٹ", callback_data="adm:broadcast")],
-        [InlineKeyboardButton(text="ًںڈ¢ ظ…ط¬ظ…ظˆط¹ط§طھ ط§ظ„ط£ظ‚ط³ط§ظ…", callback_data="adm:groups"), InlineKeyboardButton(text="ًں“‹ ط³ط¬ظ„ ط§ظ„ط¥ط¯ط§ط±ط©", callback_data="adm:logs")],
+    u = await WalletService.get_or_create_user(cb.from_user.id)
+    txt = (
+        f"💳 <b>محفظتك الإلكترونية</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💰 الرصيد الحالي: <code>{u[2]:,} ل.س</code>\n\n"
+        f"• يمكنك الشحن مسبقاً والشراء الفوري بضغطة زر دون انتظار تدقيق الإشعار في كل طلب."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ شحن رصيد المحفظة", callback_data="wallet:topup")],
+        [InlineKeyboardButton(text="🔙 القائمة الرئيسية", callback_data="back_home")]
     ])
+    await cb.message.edit_text(txt, reply_markup=kb)
 
+@dp.callback_query(F.data == "wallet:topup")
+async def wallet_topup_start(cb: types.CallbackQuery, state: FSMContext):
+    await state.set_state(WalletFlow.amount)
+    await cb.message.edit_text("💵 أدخل المبلغ الذي تريد إيداعه بالليرة السورية (أقل مبلغ 1,000 ل.س):")
 
-def admin_back_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="ًں”™ ظ„ظˆط­ط© ط§ظ„ط¥ط¯ط§ط±ط©", callback_data="adm:home")]])
+@dp.message(WalletFlow.amount)
+async def wallet_amt_rec(message: types.Message, state: FSMContext):
+    try:
+        amt = int(message.text.strip().replace(",", ""))
+        if amt < 1000:
+            await message.reply("⚠️️ الحد الأدنى للإيداع هو 1,000 ل.س:")
+            return
+        await state.update_data(dep_amt=amt)
+        await state.set_state(WalletFlow.tx_code)
+        await message.answer(
+            f"🧾 <b>طلب شحن محفظة بقيمة: {amt:,} ل.س</b>\n\n"
+            f"👤 الاسم: <code>{html.escape(SHAM_NAME)}</code>\n"
+            f"🔗 العنوان: <code>{html.escape(SHAM_ADDR)}</code>\n\n"
+            f"⚠️ قم بالتحويل، ثم <b>أرسل رقم العملية (Transaction ID) الخاص بشام كاش هنا</b> لمنع التكرار:"
+        )
+    except Exception:
+        await message.reply("⚠️ يرجى إدخال مبلغ صحيح بالأرقام:")
 
+@dp.message(WalletFlow.tx_code)
+async def wallet_tx_rec(message: types.Message, state: FSMContext):
+    tx_code = message.text.strip()
+    # التحقق من أن رقم العملية غير مكرر
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT payment_id FROM payments WHERE sham_tx_id = ?", (tx_code,))
+        if await cursor.fetchone():
+            await message.reply("⛔ رقم العملية هذا مستخدم مسبقاً! يرجى إدخال رقم صحيح:")
+            return
 
-async def require_owner_callback(callback: types.CallbackQuery) -> bool:
-    if not await is_owner(callback.from_user.id):
-        await callback.answer("â›” ظ‡ط°ط§ ط§ظ„ط¥ط¬ط±ط§ط، ظ„ظ„ظ…ط¯ظٹط± ط§ظ„ط±ط¦ظٹط³ظٹ ظپظ‚ط·.", show_alert=True)
-        return False
-    return True
+    await state.update_data(sham_tx=tx_code)
+    await state.set_state(WalletFlow.receipt)
+    await message.answer("📸 الآن أرسل صورة إشعار التحويل لتأكيد الإيداع:")
 
+@dp.message(WalletFlow.receipt, F.photo)
+async def wallet_receipt_rec(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    amt = data["dep_amt"]
+    tx_code = data["sham_tx"]
+    pay_id = generate_uid("PAY")
 
-async def require_staff_callback(callback: types.CallbackQuery) -> bool:
-    if not await can_manage_panel(callback.from_user.id):
-        await callback.answer("â›” ظ„ط§ طھظ…ظ„ظƒ طµظ„ط§ط­ظٹط© ظ„ظˆط­ط© ط§ظ„ط¥ط¯ط§ط±ط©.", show_alert=True)
-        return False
-    return True
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO payments (payment_id, user_id, method, amount, sham_tx_id, receipt_file_id) VALUES (?, ?, 'SHAM_CASH', ?, ?, ?)",
+            (pay_id, message.from_user.id, amt, tx_code, message.photo[-1].file_id)
+        )
+        await db.commit()
 
+    u_info = f"@{html.escape(message.from_user.username)}" if message.from_user.username else "بدون"
+    text_to_group = (
+        f"💳 <b>إيداع جديد بالمحفظة قيد التدقيق:</b>\n"
+        f"🆔 رقم الدفعة: <code>{pay_id}</code>\n"
+        f"👤 الزبون: {u_info} (<code>{message.from_user.id}</code>)\n"
+        f"💰 المبلغ المطلوب: <b>{amt:,} ل.س</b>\n"
+        f"🧾 رقم العملية: <code>{html.escape(tx_code)}</code>\n"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ قبول وتغذية الرصيد", callback_data=f"adm_pay:ok:{pay_id}"),
+            InlineKeyboardButton(text="❌ رفض", callback_data=f"adm_pay:no:{pay_id}")
+        ]
+    ])
+    await bot.send_photo(GROUPS["wallet"], photo=message.photo[-1].file_id, caption=text_to_group, reply_markup=kb)
+    await state.clear()
+    await message.answer("✅ تم إرسال إشعار الإيداع للتدقيق، سيصلك إشعار فور تأكيده وشحن رصيدك!")
 
-async def require_order_access(user_id: int, order) -> bool:
-    return await staff_can_section(user_id, str(order["section"]))
+# ----------------- معالج الشراء والدفع الموحد -----------------
+async def create_and_route_order(cb_or_msg, user_id: int, dept: str, service: str, target: str, price: int, state: FSMContext):
+    """إنشاء الطلب في قاعدة البيانات وعرض خيارات الدفع الذكية"""
+    ord_id = generate_uid("ORD")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO orders (order_id, user_id, department, service_name, target_data, price) VALUES (?, ?, ?, ?, ?, ?)",
+            (ord_id, user_id, dept, service, target, price)
+        )
+        await db.commit()
 
+    u = await WalletService.get_or_create_user(user_id)
+    kb = []
+    if u[2] >= price:
+        kb.append([InlineKeyboardButton(text=f"⚡ خصم فوري من المحفظة ({price:,} ل.س)", callback_data=f"pay:w:{ord_id}")])
+    kb.append([InlineKeyboardButton(text="💳 دفع يدوي شام كاش", callback_data=f"pay:m:{ord_id}")])
+    kb.append([InlineKeyboardButton(text="❌ إلغاء الطلب", callback_data=f"pay:c:{ord_id}")])
 
-async def require_payment_access(user_id: int, payment) -> bool:
-    if payment is None:
-        return False
-    order = await get_order(int(payment["order_id"]))
-    return bool(order and await require_order_access(user_id, order))
+    text = (
+        f"🧾 <b>تفاصيل الطلب:</b> <code>{ord_id}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📦 الخدمة: <b>{html.escape(service)}</b>\n"
+        f"🎯 البيانات: <code>{html.escape(target)}</code>\n"
+        f"💰 المبلغ المطلوب: <b>{price:,} ل.س</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💳 رصيد محفظتك: <code>{u[2]:,} ل.س</code>\n\n"
+        f"اختر وسيلة الدفع لإتمام طلبك:"
+    )
+    if isinstance(cb_or_msg, types.CallbackQuery):
+        await cb_or_msg.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    else:
+        await cb_or_msg.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
+@dp.callback_query(F.data.startswith("pay:w:"))
+async def pay_wallet_exec(cb: types.CallbackQuery):
+    ord_id = cb.data.split(":")[2]
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT user_id, department, service_name, target_data, price, status FROM orders WHERE order_id = ?", (ord_id,))
+        order = await cursor.fetchone()
 
-async def admin_panel_message(user_id: int):
-    return (
-        "ًں”گ <b>ظ„ظˆط­ط© ط¥ط¯ط§ط±ط© Syria Store</b>\n"
-        "â”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\n"
-        "ظ…ظ† ظ‡ظ†ط§ طھطھظ… ط¥ط¯ط§ط±ط© ط§ظ„ط·ظ„ط¨ط§طھ ظˆط§ظ„ظ…ط¯ظپظˆط¹ط§طھ ظˆط§ظ„ظ…ط³طھط®ط¯ظ…ظٹظ† ظˆط§ظ„ط£ط³ط¹ط§ط± ظˆط§ظ„ظ…ظˆط¸ظپظٹظ†.\n\n"
-        "âڑ ï¸ڈ ظƒظ„ ط¥ط¬ط±ط§ط، ظ…ط§ظ„ظٹ ط£ظˆ ط¥ط¯ط§ط±ظٹ ظ…ظ‡ظ… ظٹطھظ… طھط³ط¬ظٹظ„ظ‡ ظپظٹ ط³ط¬ظ„ ط§ظ„ط¥ط¯ط§ط±ط©."
+    if not order or order[5] != "PENDING_PAYMENT":
+        await cb.answer("⚠️ الطلب غير صالح أو تمت معالجته مسبقاً!", show_alert=True)
+        return
+
+    user_id, dept, s_name, target, price = order[0], order[1], order[2], order[3], order[4]
+    success = await WalletService.deduct_for_order(user_id, ord_id, price)
+    if not success:
+        await cb.answer("⚠️ رصيد محفظتك غير كافٍ!", show_alert=True)
+        return
+
+    # إرسال الطلب فوراً لمجموعة القسم المختص
+    group_id = GROUPS.get(dept, GROUPS["balance"])
+    u_info = f"@{html.escape(cb.from_user.username)}" if cb.from_user.username else "بدون"
+    text_to_group = (
+        f"⚡ <b>طلب جديد مدفوع بالمحفظة (جاهز للتنفيذ):</b>\n"
+        f"🆔 رقم الطلب: <code>{ord_id}</code>\n"
+        f"👤 الزبون: {u_info} (<code>{user_id}</code>)\n"
+        f"📦 الخدمة: <b>{html.escape(s_name)}</b>\n"
+        f"🎯 البيانات: <code>{html.escape(target)}</code>\n"
+        f"💰 المبلغ المقتطع: <b>{price:,} ل.س</b>\n\n"
+        f"💡 للرد على الزبون، قم بالرد المباشر (Reply) على هذه الرسالة."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ تم التنفيذ", callback_data=f"ord_act:done:{ord_id}"),
+            InlineKeyboardButton(text="❌ إلغاء واسترجاع", callback_data=f"ord_act:ref:{ord_id}")
+        ]
+    ])
+    await bot.send_message(group_id, text_to_group, reply_markup=kb)
+    await cb.message.edit_text(
+        f"✅ <b>تم خصم {price:,} ل.س من محفظتك بنجاح!</b>\n"
+        f"تم تحويل طلبك <code>{ord_id}</code> إلى فريق التنفيذ بأولوية قصوى.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 القائمة الرئيسية", callback_data="back_home")]])
     )
 
+@dp.callback_query(F.data.startswith("pay:m:"))
+async def pay_manual_start(cb: types.CallbackQuery, state: FSMContext):
+    ord_id = cb.data.split(":")[2]
+    await state.update_data(current_order_id=ord_id)
+    await state.set_state(ClientOrder.manual_receipt)
+    pay_text = (
+        f"💳 <b>بيانات الدفع عبر شام كاش:</b>\n"
+        f"👤 الاسم: <code>{html.escape(SHAM_NAME)}</code>\n"
+        f"🔗 العنوان: <code>{html.escape(SHAM_ADDR)}</code>\n\n"
+        f"⚠️ قم بالتحويل ثم <b>أرسل صورة إشعار التحويل هنا فوراً</b>:"
+    )
+    if os.path.exists(QR_IMAGE_PATH):
+        await cb.message.answer_photo(FSInputFile(QR_IMAGE_PATH), caption=pay_text)
+    else:
+        await cb.message.answer(pay_text)
+    await cb.answer()
 
+@dp.message(ClientOrder.manual_receipt, F.photo)
+async def pay_manual_receipt_rec(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    ord_id = data.get("current_order_id")
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT department, service_name, target_data, price FROM orders WHERE order_id = ?", (ord_id,))
+        order = await cursor.fetchone()
+
+    dept, s_name, target, price = order[0], order[1], order[2], order[3]
+    pay_id = generate_uid("PAY")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO payments (payment_id, order_id, user_id, method, amount, receipt_file_id) VALUES (?, ?, ?, 'SHAM_CASH', ?, ?)",
+            (pay_id, ord_id, message.from_user.id, price, message.photo[-1].file_id)
+        )
+        await db.commit()
+
+    group_id = GROUPS.get(dept, GROUPS["balance"])
+    u_info = f"@{html.escape(message.from_user.username)}" if message.from_user.username else "بدون"
+    text_to_group = (
+        f"🔔 <b>طلب يدوي جديد قيد مراجعة الدفع:</b>\n"
+        f"🆔 رقم الطلب: <code>{ord_id}</code>\n"
+        f"🆔 دفعة: <code>{pay_id}</code>\n"
+        f"👤 الزبون: {u_info} (<code>{message.from_user.id}</code>)\n"
+        f"📦 الخدمة: <b>{html.escape(s_name)}</b>\n"
+        f"🎯 البيانات: <code>{html.escape(target)}</code>\n"
+        f"💰 المبلغ المطلوب: <b>{price:,} ل.س</b>\n"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ قبول وتأكيد التنفيذ", callback_data=f"ord_act:done:{ord_id}"),
+            InlineKeyboardButton(text="❌ رفض الطلب", callback_data=f"ord_act:rej:{ord_id}")
+        ]
+    ])
+    await bot.send_photo(group_id, photo=message.photo[-1].file_id, caption=text_to_group, reply_markup=kb)
+    await state.clear()
+    await message.answer("✅ تم إرسال إشعار الدفع للإدارة! سيتم إشعارك فور تدقيقه وتنفيذه.")
+
+# =====================================================================
+# 6. إجراءات الموظفين والمجموعات (Staff Order Actions)
+# =====================================================================
+@dp.callback_query(F.data.startswith("ord_act:"))
+async def handle_staff_order_action(cb: types.CallbackQuery):
+    _, action, ord_id = cb.data.split(":")
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT user_id, service_name, status FROM orders WHERE order_id = ?", (ord_id,))
+        order = await cursor.fetchone()
+
+    if not order:
+        await cb.answer("⚠️ الطلب غير موجود!", show_alert=True)
+        return
+
+    cust_id, s_name, current_status = order[0], order[1], order[2]
+    if current_status in ["COMPLETED", "REJECTED", "REFUNDED"]:
+        await cb.answer("⚠️ تم اتخاذ إجراء على هذا الطلب مسبقاً!", show_alert=True)
+        return
+
+    if action == "done":
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE orders SET status = 'COMPLETED' WHERE order_id = ?", (ord_id,))
+            await db.commit()
+        await bot.send_message(cust_id, f"🎉 <b>تم تنفيذ طلبك بنجاح!</b>\n📦 الخدمة: <b>{html.escape(s_name)}</b>\n🆔 رقم الطلب: <code>{ord_id}</code>")
+        if cb.message.caption:
+            await cb.message.edit_caption(caption=cb.message.caption + "\n\n🟢 <b>تم التنفيذ بنجاح</b>", reply_markup=None)
+        else:
+            await cb.message.edit_text(text=cb.message.text + "\n\n🟢 <b>تم التنفيذ بنجاح</b>", reply_markup=None)
+
+    elif action == "ref":
+        success, uid, refunded_amt = await WalletService.refund(ord_id)
+        if success:
+            await bot.send_message(uid, f"↩️ <b>تم إلغاء الطلب {ord_id}</b> وإعادة مبلغ <b>{refunded_amt:,} ل.س</b> إلى محفظتك.")
+            await cb.message.edit_text(text=cb.message.text + "\n\n🟡 <b>تم الإلغاء واسترجاع الرصيد للمحفظة</b>", reply_markup=None)
+        else:
+            await cb.answer("تعذر استرجاع المبلغ، قد يكون مسترجعاً مسبقاً!", show_alert=True)
+
+    elif action == "rej":
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE orders SET status = 'REJECTED' WHERE order_id = ?", (ord_id,))
+            await db.commit()
+        await bot.send_message(cust_id, f"❌ نعتذر منك، تم رفض طلبك رقم <code>{ord_id}</code> لوجود خطأ في الإشعار أو البيانات.")
+        if cb.message.caption:
+            await cb.message.edit_caption(caption=cb.message.caption + "\n\n🔴 <b>تم رفض الطلب</b>", reply_markup=None)
+
+@dp.callback_query(F.data.startswith("adm_pay:"))
+async def handle_admin_payment_action(cb: types.CallbackQuery):
+    _, act, pay_id = cb.data.split(":")
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT user_id, amount, status FROM payments WHERE payment_id = ?", (pay_id,))
+        payment = await cursor.fetchone()
+
+    if not payment or payment[2] != "UNDER_REVIEW":
+        await cb.answer("⚠️ تمت معالجة هذه الدفعة مسبقاً!", show_alert=True)
+        return
+
+    u_id, amt = payment[0], payment[1]
+    if act == "ok":
+        await WalletService.deposit(u_id, amt, pay_id, "شحن محفظة عبر شام كاش")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE payments SET status = 'ACCEPTED' WHERE payment_id = ?", (pay_id,))
+            await db.commit()
+        u = await WalletService.get_or_create_user(u_id)
+        await bot.send_message(u_id, f"🎉 <b>تم تأكيد إيداعك بنجاح!</b>\n➕ تمت إضافة: <b>{amt:,} ل.س</b>\n💳 رصيدك الحالي: <code>{u[2]:,} ل.س</code>")
+        await cb.message.edit_caption(caption=cb.message.caption + f"\n\n🟢 <b>تم قبول الإيداع ({amt:,} ل.س)</b>", reply_markup=None)
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE payments SET status = 'DECLINED' WHERE payment_id = ?", (pay_id,))
+            await db.commit()
+        await bot.send_message(u_id, f"❌ نعتذر منك، تم رفض إشعار الإيداع للدفعة <code>{pay_id}</code> لعدم تطابق التحويل.")
+        await cb.message.edit_caption(caption=cb.message.caption + "\n\n🔴 <b>تم رفض الإيداع</b>", reply_markup=None)
+
+# ----------------- ردود المشرفين في المجموعات -----------------
+@dp.message(F.chat.id.in_(ALL_ADMIN_GROUPS), F.reply_to_message)
+async def admin_group_direct_reply(message: types.Message):
+    if not message.reply_to_message.from_user.is_bot:
+        return
+    orig = message.reply_to_message.text or message.reply_to_message.caption or ""
+    match = re.search(r"\(<code>(\d+)</code>\)", orig)
+    if match and message.text:
+        cust_id = int(match.group(1))
+        try:
+            await bot.send_message(cust_id, f"💬 <b>رسالة من الإدارة بخصوص طلبك:</b>\n\n{html.escape(message.text)}")
+            await message.reply("✅ تم تسليم الرد للعميل.")
+        except Exception as e:
+            await message.reply(f"⚠️ تعذر الإرسال: {e}")
+
+# =====================================================================
+# 7. لوحة الإدارة الشاملة (/admin)
+# =====================================================================
 @dp.message(Command("admin"))
-async def admin_command(message: types.Message, state: FSMContext):
-    await state.clear()
-    if not await can_manage_panel(message.from_user.id):
-        await message.answer("â›” ظ„ط§ طھظ…ظ„ظƒ طµظ„ط§ط­ظٹط© ط§ظ„ط¯ط®ظˆظ„ ط¥ظ„ظ‰ ظ„ظˆط­ط© ط§ظ„ط¥ط¯ط§ط±ط©.")
+async def admin_panel_start(message: types.Message):
+    u = await WalletService.get_or_create_user(message.from_user.id)
+    if u[5] != "ADMIN":
         return
-    await message.answer(await admin_panel_message(message.from_user.id), reply_markup=admin_main_keyboard())
 
-
-@dp.callback_query(F.data == "adm:home")
-async def admin_home(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    if not await require_staff_callback(callback):
-        return
-    await callback.answer()
-    await callback.message.edit_text(await admin_panel_message(callback.from_user.id), reply_markup=admin_main_keyboard())
-
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 إحصائيات النظام", callback_data="adm:stats"), InlineKeyboardButton(text="👥 بحث عن مستخدم", callback_data="adm:find_user")],
+        [InlineKeyboardButton(text="💵 تعديل رصيد مستخدم", callback_data="adm:edit_bal"), InlineKeyboardButton(text="💱 سعر صرف الدولار", callback_data="adm:set_rate")],
+        [InlineKeyboardButton(text="📢 إذاعة جماعية", callback_data="adm:broadcast")],
+        [InlineKeyboardButton(text="❌ إغلاق اللوحة", callback_data="adm:close")]
+    ])
+    await message.answer("⚙️ <b>لوحة التحكم الرئيسية للمدير (V2 Core):</b>", reply_markup=kb)
 
 @dp.callback_query(F.data == "adm:stats")
-async def admin_stats(callback: types.CallbackQuery):
-    if not await require_staff_callback(callback):
-        return
-    async with await db_connect() as db:
-        users = await fetchone(db, "SELECT COUNT(*) c FROM users")
-        blocked = await fetchone(db, "SELECT COUNT(*) c FROM users WHERE is_blocked=1")
-        orders = await fetchone(db, "SELECT COUNT(*) c FROM orders")
-        pending_orders = await fetchone(db, "SELECT COUNT(*) c FROM orders WHERE status IN ('payment_review','paid','processing')")
-        completed = await fetchone(db, "SELECT COUNT(*) c FROM orders WHERE status='completed'")
-        pending_pay = await fetchone(db, "SELECT COUNT(*) c FROM payments WHERE status='pending'")
-        turnover = await fetchone(db, "SELECT COALESCE(SUM(amount),0) total FROM payments WHERE status='approved'")
-    text = (
-        "ًں“ٹ <b>ط¥ط­طµط§ط¦ظٹط§طھ ط§ظ„ط¨ظˆطھ</b>\nâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\n"
-        f"ًں‘¥ ط§ظ„ظ…ط³طھط®ط¯ظ…ظˆظ†: <b>{users['c']}</b>\n"
-        f"ًںڑ« ط§ظ„ظ…ط­ط¸ظˆط±ظˆظ†: <b>{blocked['c']}</b>\n"
-        f"ًں“¦ ط¥ط¬ظ…ط§ظ„ظٹ ط§ظ„ط·ظ„ط¨ط§طھ: <b>{orders['c']}</b>\n"
-        f"âڈ³ ط§ظ„ط·ظ„ط¨ط§طھ ط§ظ„ظ†ط´ط·ط©: <b>{pending_orders['c']}</b>\n"
-        f"âœ… ط§ظ„ط·ظ„ط¨ط§طھ ط§ظ„ظ…ظƒطھظ…ظ„ط©: <b>{completed['c']}</b>\n"
-        f"ًں’³ ط¯ظپط¹ط§طھ ط¨ط§ظ†طھط¸ط§ط± ط§ظ„ظ…ط±ط§ط¬ط¹ط©: <b>{pending_pay['c']}</b>\n"
-        f"ًں’° ط¥ط¬ظ…ط§ظ„ظٹ ط§ظ„ط¯ظپط¹ط§طھ ط§ظ„ظ…ظ‚ط¨ظˆظ„ط©: <b>{money(int(turnover['total']))}</b>"
+async def adm_stats_view(cb: types.CallbackQuery):
+    async with aiosqlite.connect(DB_PATH) as db:
+        c1 = await db.execute("SELECT COUNT(*) FROM users")
+        total_users = (await c1.fetchone())[0]
+        c2 = await db.execute("SELECT COUNT(*) FROM orders")
+        total_orders = (await c2.fetchone())[0]
+        c3 = await db.execute("SELECT SUM(amount) FROM payments WHERE status = 'ACCEPTED'")
+        total_income = (await c3.fetchone())[0] or 0
+
+    txt = (
+        f"📊 <b>إحصائيات المنصة:</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"👥 إجمالي المستخدمين: <b>{total_users:,}</b>\n"
+        f"📦 إجمالي الطلبات: <b>{total_orders:,}</b>\n"
+        f"💰 إجمالي الإيداعات المقبولة: <b>{total_income:,} ل.س</b>\n"
     )
-    await callback.message.edit_text(text, reply_markup=admin_back_keyboard())
+    await cb.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 رجوع", callback_data="adm:home")]]))
 
+@dp.callback_query(F.data == "adm:home")
+async def adm_home_return(cb: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 إحصائيات النظام", callback_data="adm:stats"), InlineKeyboardButton(text="👥 بحث عن مستخدم", callback_data="adm:find_user")],
+        [InlineKeyboardButton(text="💵 تعديل رصيد مستخدم", callback_data="adm:edit_bal"), InlineKeyboardButton(text="💱 سعر صرف الدولار", callback_data="adm:set_rate")],
+        [InlineKeyboardButton(text="📢 إذاعة جماعية", callback_data="adm:broadcast")],
+        [InlineKeyboardButton(text="❌ إغلاق اللوحة", callback_data="adm:close")]
+    ])
+    await cb.message.edit_text("⚙️ <b>لوحة التحكم الرئيسية للمدير:</b>", reply_markup=kb)
 
-@dp.callback_query(F.data == "adm:orders")
-async def admin_orders(callback: types.CallbackQuery):
-    if not await require_staff_callback(callback):
-        return
-    role = await get_staff_role(callback.from_user.id)
-    async with await db_connect() as db:
-        if role in {"owner", "staff"}:
-            rows = await fetchall(
-                db,
-                """SELECT id,order_no,user_id,section,service,price,status,created_at
-                   FROM orders ORDER BY id DESC LIMIT 15""",
-            )
-        else:
-            rows = await fetchall(
-                db,
-                """SELECT id,order_no,user_id,section,service,price,status,created_at
-                   FROM orders WHERE section=? ORDER BY id DESC LIMIT 15""",
-                (role,),
-            )
-    if not rows:
-        text = "ًں“¦ ظ„ط§ طھظˆط¬ط¯ ط·ظ„ط¨ط§طھ ط­طھظ‰ ط§ظ„ط¢ظ†."
-        kb = admin_back_keyboard()
-    else:
-        text = "ًں“¦ <b>ط¢ط®ط± ط§ظ„ط·ظ„ط¨ط§طھ</b>\nâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\n"
-        buttons = []
-        for row in rows:
-            text += f"<code>{esc(row['order_no'])}</code> â€” {esc(row['service'])} â€” {money(int(row['price'] or 0))} â€” <b>{ORDER_STATUSES.get(row['status'], row['status'])}</b>\n"
-            buttons.append([InlineKeyboardButton(text=f"ًں”ژ {row['order_no']}", callback_data=f"adm:order:{row['id']}")])
-        buttons.append([InlineKeyboardButton(text="ًں”™ ظ„ظˆط­ط© ط§ظ„ط¥ط¯ط§ط±ط©", callback_data="adm:home")])
-        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await callback.message.edit_text(text, reply_markup=kb)
+@dp.callback_query(F.data == "adm:close")
+async def adm_close(cb: types.CallbackQuery):
+    await cb.message.delete()
 
-
-async def order_admin_keyboard(order):
-    oid = int(order["id"])
-    status = order["status"]
-    buttons = []
-    if status == "paid":
-        buttons.append([InlineKeyboardButton(text="â–¶ï¸ڈ ط¨ط¯ط، ط§ظ„طھظ†ظپظٹط°", callback_data=f"adm:processing:{oid}")])
-    if status == "processing":
-        buttons.append([InlineKeyboardButton(text="âœ… ط¥طھظ…ط§ظ… ط§ظ„ط·ظ„ط¨", callback_data=f"adm:complete:{oid}")])
-    if status in {"paid", "processing"}:
-        buttons.append([InlineKeyboardButton(text="â‌Œ ط±ظپط¶/ط¥ظ„ط؛ط§ط،", callback_data=f"adm:reject:{oid}")])
-    buttons.append([InlineKeyboardButton(text="ًں”™ ط§ظ„ط·ظ„ط¨ط§طھ", callback_data="adm:orders")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-async def order_detail_text(order):
-    user = await get_user(int(order["user_id"]))
-    username = f"@{user['username']}" if user and user["username"] else "ط¨ط¯ظˆظ† ظٹظˆط²ط±"
-    return (
-        "ًں“¦ <b>طھظپط§طµظٹظ„ ط§ظ„ط·ظ„ط¨</b>\nâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\n"
-        f"ًں†” ط±ظ‚ظ… ط§ظ„ط·ظ„ط¨: <code>{esc(order['order_no'])}</code>\n"
-        f"ًں‘¤ ط§ظ„ط¹ظ…ظٹظ„: {esc(username)} (<code>{order['user_id']}</code>)\n"
-        f"ًںڈ· ط§ظ„ظ‚ط³ظ…: {esc(order['section'])}\n"
-        f"ًں›چ ط§ظ„ط®ط¯ظ…ط©: {esc(order['service'])}\n"
-        f"ًںژ¯ ط§ظ„ظ‡ط¯ظپ: {esc(order['target'])}\n"
-        f"ًں“¦ ط§ظ„ظƒظ…ظٹط©: {esc(order['quantity'])}\n"
-        f"ًں’° ط§ظ„ط³ط¹ط±: <b>{money(int(order['price'] or 0))}</b>\n"
-        f"ًں’³ ط§ظ„ط¯ظپط¹: {esc(order['payment_method'] or 'ظ„ظ… ظٹط­ط¯ط¯')}\n"
-        f"ًں“Œ ط§ظ„ط­ط§ظ„ط©: <b>{ORDER_STATUSES.get(order['status'], order['status'])}</b>\n"
-        f"ًں•’ ط§ظ„ط¥ظ†ط´ط§ط،: {esc(order['created_at'])}"
-    )
-
-
-@dp.callback_query(F.data.startswith("adm:order:"))
-async def admin_order_detail(callback: types.CallbackQuery):
-    if not await require_staff_callback(callback):
-        return
-    order_id = int(callback.data.split(":")[-1])
-    order = await get_order(order_id)
-    if not order:
-        await callback.answer("ط§ظ„ط·ظ„ط¨ ط؛ظٹط± ظ…ظˆط¬ظˆط¯.", show_alert=True)
-        return
-    if not await require_order_access(callback.from_user.id, order):
-        await callback.answer("â›” ظ„ط§ طھظ…ظ„ظƒ طµظ„ط§ط­ظٹط© ظ‡ط°ط§ ط§ظ„ظ‚ط³ظ….", show_alert=True)
-        return
-    await callback.message.edit_text(await order_detail_text(order), reply_markup=await order_admin_keyboard(order))
-
-
-@dp.callback_query(F.data.startswith("adm:processing:"))
-async def admin_processing(callback: types.CallbackQuery):
-    if not await require_staff_callback(callback):
-        return
-    oid = int(callback.data.split(":")[-1])
-    original = await get_order(oid)
-    if not original or not await require_order_access(callback.from_user.id, original):
-        await callback.answer("â›” ظ„ط§ طھظ…ظ„ظƒ طµظ„ط§ط­ظٹط© ظ‡ط°ط§ ط§ظ„ظ‚ط³ظ….", show_alert=True)
-        return
-    ok, order = await mark_order_processing(oid, callback.from_user.id)
-    if not ok:
-        await callback.answer("ظ„ط§ ظٹظ…ظƒظ† ط¨ط¯ط، طھظ†ظپظٹط° ظ‡ط°ط§ ط§ظ„ط·ظ„ط¨ ط¨ط§ظ„ط­ط§ظ„ط© ط§ظ„ط­ط§ظ„ظٹط©.", show_alert=True)
-        return
-    await callback.answer("â–¶ï¸ڈ ط¨ط¯ط£ ط§ظ„طھظ†ظپظٹط°.")
-    await callback.message.edit_text(await order_detail_text(await get_order(oid)), reply_markup=await order_admin_keyboard(await get_order(oid)))
-    try:
-        await bot.send_message(int(order["user_id"]), f"â–¶ï¸ڈ ط¨ط¯ط£ طھظ†ظپظٹط° ط·ظ„ط¨ظƒ <code>{esc(order['order_no'])}</code>.")
-    except Exception:
-        logger.exception("Could not notify user about processing order")
-
-
-@dp.callback_query(F.data.startswith("adm:complete:"))
-async def admin_complete(callback: types.CallbackQuery):
-    if not await require_staff_callback(callback):
-        return
-    oid = int(callback.data.split(":")[-1])
-    original = await get_order(oid)
-    if not original or not await require_order_access(callback.from_user.id, original):
-        await callback.answer("â›” ظ„ط§ طھظ…ظ„ظƒ طµظ„ط§ط­ظٹط© ظ‡ط°ط§ ط§ظ„ظ‚ط³ظ….", show_alert=True)
-        return
-    ok, order = await finish_order(oid, callback.from_user.id)
-    if not ok:
-        await callback.answer("ظ„ط§ ظٹظ…ظƒظ† ط¥طھظ…ط§ظ… ظ‡ط°ط§ ط§ظ„ط·ظ„ط¨ ط¨ط§ظ„ط­ط§ظ„ط© ط§ظ„ط­ط§ظ„ظٹط©.", show_alert=True)
-        return
-    await callback.answer("âœ… طھظ… ط¥طھظ…ط§ظ… ط§ظ„ط·ظ„ط¨.")
-    fresh = await get_order(oid)
-    await callback.message.edit_text(await order_detail_text(fresh), reply_markup=await order_admin_keyboard(fresh))
-    try:
-        await bot.send_message(int(order["user_id"]), f"âœ… طھظ… ط¥طھظ…ط§ظ… ط·ظ„ط¨ظƒ <code>{esc(order['order_no'])}</code> ط¨ظ†ط¬ط§ط­.")
-    except Exception:
-        logger.exception("Could not notify user about completed order")
-
-
-@dp.callback_query(F.data.startswith("adm:reject:"))
-async def admin_reject(callback: types.CallbackQuery):
-    if not await require_staff_callback(callback):
-        return
-    oid = int(callback.data.split(":")[-1])
-    order = await get_order(oid)
-    if order and not await require_order_access(callback.from_user.id, order):
-        await callback.answer("â›” ظ„ط§ طھظ…ظ„ظƒ طµظ„ط§ط­ظٹط© ظ‡ط°ط§ ط§ظ„ظ‚ط³ظ….", show_alert=True)
-        return
-    if not order or order["status"] not in {"paid", "processing"}:
-        await callback.answer("ظ„ط§ ظٹظ…ظƒظ† ط±ظپط¶ ط§ظ„ط·ظ„ط¨ ط¨ظ‡ط°ظ‡ ط§ظ„ط­ط§ظ„ط©.", show_alert=True)
-        return
-    await set_order_status(oid, "rejected", "طھظ… ط§ظ„ط±ظپط¶ ظ…ظ† ط§ظ„ط¥ط¯ط§ط±ط©")
-    await callback.answer("طھظ… ط±ظپط¶ ط§ظ„ط·ظ„ط¨.")
-    fresh = await get_order(oid)
-    await callback.message.edit_text(await order_detail_text(fresh), reply_markup=await order_admin_keyboard(fresh))
-    try:
-        await bot.send_message(int(order["user_id"]), f"â‌Œ طھظ… ط±ظپط¶ ط·ظ„ط¨ظƒ <code>{esc(order['order_no'])}</code>. طھظˆط§طµظ„ ظ…ط¹ ط§ظ„ط¯ط¹ظ… ط¹ظ†ط¯ ط§ظ„ط­ط§ط¬ط©.")
-    except Exception:
-        logger.exception("Could not notify user about rejected order")
-
-
-@dp.callback_query(F.data == "adm:payments")
-async def admin_payments(callback: types.CallbackQuery):
-    if not await require_staff_callback(callback):
-        return
-    role = await get_staff_role(callback.from_user.id)
-    async with await db_connect() as db:
-        if role in {"owner", "staff"}:
-            rows = await fetchall(
-                db,
-                """SELECT p.id,p.payment_no,p.user_id,p.order_id,p.amount,p.method,p.reference,p.created_at
-                   FROM payments p WHERE p.status='pending' ORDER BY p.id ASC LIMIT 20""",
-            )
-        else:
-            rows = await fetchall(
-                db,
-                """SELECT p.id,p.payment_no,p.user_id,p.order_id,p.amount,p.method,p.reference,p.created_at
-                   FROM payments p JOIN orders o ON o.id=p.order_id
-                   WHERE p.status='pending' AND o.section=? ORDER BY p.id ASC LIMIT 20""",
-                (role,),
-            )
-    if not rows:
-        await callback.message.edit_text("ًں’³ ظ„ط§ طھظˆط¬ط¯ ط¯ظپط¹ط§طھ ط¨ط§ظ†طھط¸ط§ط± ط§ظ„ظ…ط±ط§ط¬ط¹ط©.", reply_markup=admin_back_keyboard())
-        return
-    text = "ًں’³ <b>ط¯ظپط¹ط§طھ ط¨ط§ظ†طھط¸ط§ط± ط§ظ„ظ…ط±ط§ط¬ط¹ط©</b>\nâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\n"
-    buttons = []
-    for row in rows:
-        text += f"<code>{row['payment_no']}</code> â€” {money(int(row['amount']))} â€” {esc(row['method'])}\n"
-        buttons.append([InlineKeyboardButton(text=f"ًں”ژ {row['payment_no']}", callback_data=f"adm:payment:{row['id']}")])
-    buttons.append([InlineKeyboardButton(text="ًں”™ ظ„ظˆط­ط© ط§ظ„ط¥ط¯ط§ط±ط©", callback_data="adm:home")])
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-
-@dp.callback_query(F.data.startswith("adm:payment:"))
-async def admin_payment_detail(callback: types.CallbackQuery):
-    if not await require_staff_callback(callback):
-        return
-    pid = int(callback.data.split(":")[-1])
-    payment = await get_payment(pid)
-    if not payment:
-        await callback.answer("ط§ظ„ط¯ظپط¹ط© ط؛ظٹط± ظ…ظˆط¬ظˆط¯ط©.", show_alert=True)
-        return
-    if not await require_payment_access(callback.from_user.id, payment):
-        await callback.answer("â›” ظ„ط§ طھظ…ظ„ظƒ طµظ„ط§ط­ظٹط© ظ‡ط°ط§ ط§ظ„ظ‚ط³ظ….", show_alert=True)
-        return
-    text = (
-        "ًں’³ <b>ظ…ط±ط§ط¬ط¹ط© ط¯ظپط¹ط©</b>\nâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\n"
-        f"ًں†” {esc(payment['payment_no'])}\n"
-        f"ًں‘¤ ط§ظ„ظ…ط³طھط®ط¯ظ…: <code>{payment['user_id']}</code>\n"
-        f"ًں“¦ ط§ظ„ط·ظ„ط¨: <code>{payment['order_id']}</code>\n"
-        f"ًں’° ط§ظ„ظ…ط¨ظ„ط؛: <b>{money(int(payment['amount']))}</b>\n"
-        f"ًں’³ ط§ظ„ط·ط±ظٹظ‚ط©: {esc(payment['method'])}\n"
-        f"ًں§¾ ط§ظ„ظ…ط±ط¬ط¹: <code>{esc(payment['reference'] or 'ط؛ظٹط± ظ…ظˆط¬ظˆط¯')}</code>\n"
-        f"ًں•’ {esc(payment['created_at'])}"
-    )
-    buttons = [
-        [InlineKeyboardButton(text="âœ… ظ‚ط¨ظˆظ„", callback_data=f"adm:approve:{pid}"), InlineKeyboardButton(text="â‌Œ ط±ظپط¶", callback_data=f"adm:deny:{pid}")],
-        [InlineKeyboardButton(text="ًں”™ ط§ظ„ظ…ط¯ظپظˆط¹ط§طھ", callback_data="adm:payments")],
-    ]
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-
-@dp.callback_query(F.data.startswith("adm:approve:"))
-async def admin_approve_payment(callback: types.CallbackQuery):
-    if not await require_staff_callback(callback):
-        return
-    pid = int(callback.data.split(":")[-1])
-    payment_before = await get_payment(pid)
-    if not payment_before or not await require_payment_access(callback.from_user.id, payment_before):
-        await callback.answer("â›” ظ„ط§ طھظ…ظ„ظƒ طµظ„ط§ط­ظٹط© ظ‡ط°ط§ ط§ظ„ظ‚ط³ظ….", show_alert=True)
-        return
-    ok, status, payment = await review_payment(pid, callback.from_user.id, True)
-    if not ok:
-        await callback.answer("ط§ظ„ط¯ظپط¹ط© طھظ…طھ ظ…ط±ط§ط¬ط¹طھظ‡ط§ ظ…ط³ط¨ظ‚ط§ظ‹ ط£ظˆ ط؛ظٹط± ظ…ظˆط¬ظˆط¯ط©.", show_alert=True)
-        return
-    await callback.answer("âœ… طھظ… ظ‚ط¨ظˆظ„ ط§ظ„ط¯ظپط¹ط©.")
-    await callback.message.edit_text("âœ… طھظ… ظ‚ط¨ظˆظ„ ط§ظ„ط¯ظپط¹ط© ظˆطھط³ط¬ظٹظ„ظ‡ط§ ظپظٹ ظ‚ط§ط¹ط¯ط© ط§ظ„ط¨ظٹط§ظ†ط§طھ.", reply_markup=admin_back_keyboard())
-    if payment and payment["order_id"]:
-        approved_order = await get_order(int(payment["order_id"]))
-        if approved_order and approved_order["section"] != "wallet":
-            try:
-                await dispatch_order_to_group(int(payment["order_id"]))
-            except Exception:
-                logger.exception("Dispatch after payment approval failed")
-    try:
-        if payment:
-            await bot.send_message(int(payment["user_id"]), f"âœ… طھظ… ظ‚ط¨ظˆظ„ ط¯ظپط¹طھظƒ <code>{esc(payment['payment_no'])}</code> ط¨ظ…ط¨ظ„ط؛ {money(int(payment['amount']))}.")
-    except Exception:
-        logger.exception("Payment approval notification failed")
-
-
-@dp.callback_query(F.data.startswith("adm:deny:"))
-async def admin_deny_payment(callback: types.CallbackQuery):
-    if not await require_staff_callback(callback):
-        return
-    pid = int(callback.data.split(":")[-1])
-    payment_before = await get_payment(pid)
-    if not payment_before or not await require_payment_access(callback.from_user.id, payment_before):
-        await callback.answer("â›” ظ„ط§ طھظ…ظ„ظƒ طµظ„ط§ط­ظٹط© ظ‡ط°ط§ ط§ظ„ظ‚ط³ظ….", show_alert=True)
-        return
-    ok, status, payment = await review_payment(pid, callback.from_user.id, False)
-    if not ok:
-        await callback.answer("ط§ظ„ط¯ظپط¹ط© طھظ…طھ ظ…ط±ط§ط¬ط¹طھظ‡ط§ ظ…ط³ط¨ظ‚ط§ظ‹ ط£ظˆ ط؛ظٹط± ظ…ظˆط¬ظˆط¯ط©.", show_alert=True)
-        return
-    await callback.answer("طھظ… ط±ظپط¶ ط§ظ„ط¯ظپط¹ط©.")
-    await callback.message.edit_text("â‌Œ طھظ… ط±ظپط¶ ط§ظ„ط¯ظپط¹ط© ظˆطھط³ط¬ظٹظ„ ط§ظ„ظ‚ط±ط§ط±.", reply_markup=admin_back_keyboard())
-    try:
-        if payment:
-            await bot.send_message(int(payment["user_id"]), f"â‌Œ طھظ… ط±ظپط¶ ط¯ظپط¹طھظƒ <code>{esc(payment['payment_no'])}</code>. طھظˆط§طµظ„ ظ…ط¹ ط§ظ„ط¯ط¹ظ… ط¥ط°ط§ ظƒط§ظ† ظ„ط¯ظٹظƒ ط¥ط«ط¨ط§طھ طھط­ظˆظٹظ„.")
-    except Exception:
-        logger.exception("Payment denial notification failed")
-
-
-@dp.callback_query(F.data == "adm:users")
-async def admin_users(callback: types.CallbackQuery, state: FSMContext):
-    if not await require_staff_callback(callback):
-        return
-    await state.set_state(AdminState.search_user)
-    await callback.message.edit_text(
-        "ًں‘¥ <b>ط¨ط­ط« ط¹ظ† ظ…ط³طھط®ط¯ظ…</b>\n\nط£ط±ط³ظ„ Telegram ID ط£ظˆ @username ظ„ظ„ط¨ط­ط«.",
-        reply_markup=admin_back_keyboard(),
-    )
-
-
-@dp.message(AdminState.search_user)
-async def admin_search_user(message: types.Message, state: FSMContext):
-    if not await is_staff(message.from_user.id):
-        return
-    query = message.text.strip()
-    async with await db_connect() as db:
-        if query.startswith("@"): query = query[1:]
-        if query.isdigit():
-            rows = await fetchall(db, "SELECT * FROM users WHERE user_id=?", (int(query),))
-        else:
-            rows = await fetchall(db, "SELECT * FROM users WHERE username LIKE ? LIMIT 10", (query,))
-    if not rows:
-        await message.answer("â‌Œ ظ„ظ… ظٹطھظ… ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ ط§ظ„ظ…ط³طھط®ط¯ظ….", reply_markup=admin_back_keyboard())
-        return
-    buttons = []
-    text = "ًں‘¥ <b>ظ†طھط§ط¦ط¬ ط§ظ„ط¨ط­ط«</b>\nâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\n"
-    for row in rows:
-        text += f"<code>{row['user_id']}</code> â€” @{esc(row['username'] or 'ط¨ط¯ظˆظ†')} â€” {money(int(row['balance']))}\n"
-        buttons.append([InlineKeyboardButton(text=f"ًں‘¤ {row['user_id']}", callback_data=f"adm:user:{row['user_id']}")])
-    buttons.append([InlineKeyboardButton(text="ًں”™ ظ„ظˆط­ط© ط§ظ„ط¥ط¯ط§ط±ط©", callback_data="adm:home")])
+@dp.callback_query(F.data == "back_home")
+async def back_to_home_cb(cb: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-
-@dp.callback_query(F.data.startswith("adm:user:"))
-async def admin_user_detail(callback: types.CallbackQuery):
-    if not await require_staff_callback(callback):
-        return
-    uid = int(callback.data.split(":")[-1])
-    user = await get_user(uid)
-    if not user:
-        await callback.answer("ط§ظ„ظ…ط³طھط®ط¯ظ… ط؛ظٹط± ظ…ظˆط¬ظˆط¯.", show_alert=True)
-        return
+    u = await WalletService.get_or_create_user(cb.from_user.id)
+    rank = "🌟 زبون دائم (VIP)" if u[3] == 1 else "👤 زبون عادي"
     text = (
-        "ًں‘¤ <b>ظ…ظ„ظپ ط§ظ„ظ…ط³طھط®ط¯ظ…</b>\nâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\n"
-        f"ًں†” ID: <code>{user['user_id']}</code>\n"
-        f"ًں‘¤ ط§ظ„ط§ط³ظ…: {esc(user['first_name'])}\n"
-        f"ًں”— ط§ظ„ظٹظˆط²ط±: @{esc(user['username'] or 'ط¨ط¯ظˆظ†')}\n"
-        f"ًں’° ط§ظ„ط±طµظٹط¯: <b>{money(int(user['balance']))}</b>\n"
-        f"ًںŒں VIP: {'ظ†ط¹ظ…' if int(user['is_vip']) else 'ظ„ط§'}\n"
-        f"ًںڑ« ط§ظ„ط­ط§ظ„ط©: {'ظ…ط­ط¸ظˆط±' if int(user['is_blocked']) else 'ظپط¹ط§ظ„'}"
+        f"👋 <b>مرحباً بك في سوريا ستور (Syria Store)</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🏷 <b>الرتبة:</b> {rank}\n"
+        f"💰 <b>رصيد المحفظة:</b> <code>{u[2]:,} ل.س</code>\n"
+        f"🆔 <b>معرّفك:</b> <code>{u[0]}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"اختر القسم المطلوب للبدء فوراً:"
     )
-    buttons = [
-        [InlineKeyboardButton(text="ًں’° طھط¹ط¯ظٹظ„ ط§ظ„ط±طµظٹط¯", callback_data=f"adm:balance_user:{uid}")],
-        [InlineKeyboardButton(text="ًںڑ« ط­ط¸ط±" if not int(user['is_blocked']) else "âœ… ظپظƒ ط§ظ„ط­ط¸ط±", callback_data=f"adm:block:{uid}")],
-        [InlineKeyboardButton(text="ًں”™ ط§ظ„ظ…ط³طھط®ط¯ظ…ظˆظ†", callback_data="adm:users")],
-    ]
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await cb.message.edit_text(text, reply_markup=client_main_kb())
 
+# =====================================================================
+# 8. نموذج تجريبي لقسم الشحن (للتأكد من عمل دورة الطلب كاملة)
+# =====================================================================
+@dp.callback_query(F.data == "sec:games")
+async def test_game_menu(cb: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔫 ببجي: 60 UC (15,000 ل.س)", callback_data="demo_buy:pubg_60:15000:ببجي 60 UC")],
+        [InlineKeyboardButton(text="🔫 ببجي: 325 UC (75,000 ل.س)", callback_data="demo_buy:pubg_325:75000:ببجي 325 UC")],
+        [InlineKeyboardButton(text="🔙 رجوع", callback_data="back_home")]
+    ])
+    await cb.message.edit_text("اختر الباقة التجريبية لاختبار دورة الطلب:", reply_markup=kb)
 
-@dp.callback_query(F.data.startswith("adm:block:"))
-async def admin_block_user(callback: types.CallbackQuery):
-    if not await require_owner_callback(callback):
-        return
-    uid = int(callback.data.split(":")[-1])
-    if uid == ADMIN_ID:
-        await callback.answer("ظ„ط§ ظٹظ…ظƒظ† ط­ط¸ط± ط§ظ„ظ…ط¯ظٹط± ط§ظ„ط±ط¦ظٹط³ظٹ.", show_alert=True)
-        return
-    user = await get_user(uid)
-    if not user:
-        await callback.answer("ط§ظ„ظ…ط³طھط®ط¯ظ… ط؛ظٹط± ظ…ظˆط¬ظˆط¯.", show_alert=True)
-        return
-    new_value = not bool(int(user["is_blocked"]))
-    await set_blocked(uid, new_value)
-    await callback.answer("طھظ… طھط­ط¯ظٹط« ط­ط§ظ„ط© ط§ظ„ظ…ط³طھط®ط¯ظ….")
-    fresh = await get_user(uid)
-    await callback.message.edit_text(
-        "ًں‘¤ <b>ظ…ظ„ظپ ط§ظ„ظ…ط³طھط®ط¯ظ…</b>\nâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\n"
-        f"ًں†” ID: <code>{fresh['user_id']}</code>\n"
-        f"ًں’° ط§ظ„ط±طµظٹط¯: <b>{money(int(fresh['balance']))}</b>\n"
-        f"ًںڑ« ط§ظ„ط­ط§ظ„ط©: {'ظ…ط­ط¸ظˆط±' if int(fresh['is_blocked']) else 'ظپط¹ط§ظ„'}",
-        reply_markup=admin_back_keyboard(),
-    )
+@dp.callback_query(F.data.startswith("demo_buy:"))
+async def test_game_buy(cb: types.CallbackQuery, state: FSMContext):
+    _, code, price, title = cb.data.split(":")
+    await state.update_data(demo_item=title, demo_price=int(price))
+    await state.set_state(ClientOrder.inputting_data)
+    await cb.message.edit_text(f"أدخل الآيدي (Player ID) واسمك داخل اللعبة لشحن <b>{title}</b>:")
 
-
-@dp.callback_query(F.data == "adm:balance")
-async def admin_balance(callback: types.CallbackQuery, state: FSMContext):
-    if not await require_owner_callback(callback):
-        return
-    await state.set_state(AdminState.balance_user_id)
-    await callback.message.edit_text("ًں’° ط£ط±ط³ظ„ Telegram ID ظ„ظ„ظ…ط³طھط®ط¯ظ… ط§ظ„ط°ظٹ طھط±ظٹط¯ طھط¹ط¯ظٹظ„ ط±طµظٹط¯ظ‡.", reply_markup=admin_back_keyboard())
-
-
-@dp.callback_query(F.data.startswith("adm:balance_user:"))
-async def admin_balance_from_user(callback: types.CallbackQuery, state: FSMContext):
-    if not await require_owner_callback(callback):
-        return
-    uid = int(callback.data.split(":")[-1])
-    await state.update_data(balance_user_id=uid)
-    await state.set_state(AdminState.balance_amount)
-    await callback.message.edit_text(
-        f"ًں’° ط§ظ„ظ…ط³طھط®ط¯ظ…: <code>{uid}</code>\nط£ط±ط³ظ„ ط§ظ„ظ…ط¨ظ„ط؛:\nط§ط³طھط®ط¯ظ… ط±ظ‚ظ… ظ…ظˆط¬ط¨ ظ„ظ„ط¥ط¶ط§ظپط© ط£ظˆ ط³ط§ظ„ط¨ ظ„ظ„ط®طµظ….\nظ…ط«ط§ظ„: <code>50000</code> ط£ظˆ <code>-10000</code>",
-        reply_markup=admin_back_keyboard(),
-    )
-
-
-@dp.message(AdminState.balance_user_id)
-async def admin_balance_user_id(message: types.Message, state: FSMContext):
-    if not await is_owner(message.from_user.id): return
-    if not message.text or not message.text.strip().lstrip("-").isdigit():
-        await message.answer("â‌Œ ط£ط±ط³ظ„ Telegram ID طµط­ظٹط­ط§ظ‹.")
-        return
-    await state.update_data(balance_user_id=int(message.text.strip()))
-    await state.set_state(AdminState.balance_amount)
-    await message.answer("ط£ط±ط³ظ„ ط§ظ„ظ…ط¨ظ„ط؛. ظ…ظˆط¬ط¨ ظ„ظ„ط¥ط¶ط§ظپط© ظˆط³ط§ظ„ط¨ ظ„ظ„ط®طµظ….")
-
-
-@dp.message(AdminState.balance_amount)
-async def admin_balance_amount(message: types.Message, state: FSMContext):
-    if not await is_owner(message.from_user.id): return
-    raw = message.text.strip().replace(",", "")
-    if not raw.lstrip("-").isdigit() or int(raw) == 0:
-        await message.answer("â‌Œ ط£ط±ط³ظ„ ظ…ط¨ظ„ط؛ط§ظ‹ طµط­ظٹط­ط§ظ‹ ط؛ظٹط± طµظپط±ظٹ.")
-        return
-    amount = int(raw)
+@dp.message(ClientOrder.inputting_data)
+async def test_game_input_done(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    uid = int(data["balance_user_id"])
-    user = await get_user(uid)
-    if not user:
-        await message.answer("â‌Œ ط§ظ„ظ…ط³طھط®ط¯ظ… ط؛ظٹط± ظ…ظˆط¬ظˆط¯.")
-        await state.clear()
-        return
-    if amount > 0:
-        ok = await wallet_credit(uid, amount, "admin_credit", "طھط¹ط¯ظٹظ„ ظٹط¯ظˆظٹ ظ…ظ† ط§ظ„ظ…ط¯ظٹط±")
-    else:
-        ok = await wallet_debit(uid, abs(amount), "admin_debit", "ط®طµظ… ظٹط¯ظˆظٹ ظ…ظ† ط§ظ„ظ…ط¯ظٹط±")
+    item = data["demo_item"]
+    price = data["demo_price"]
+    target = message.text.strip()
     await state.clear()
-    await message.answer("âœ… طھظ… طھط¹ط¯ظٹظ„ ط§ظ„ط±طµظٹط¯." if ok else "â‌Œ طھط¹ط°ط± طھط¹ط¯ظٹظ„ ط§ظ„ط±طµظٹط¯.", reply_markup=admin_main_keyboard())
-    try:
-        if ok:
-            await bot.send_message(uid, f"ًں’° طھظ… طھط­ط¯ظٹط« ط±طµظٹط¯ ظ…ط­ظپط¸طھظƒ ظ…ظ† ط§ظ„ط¥ط¯ط§ط±ط©. ط§ظ„ط±طµظٹط¯ ط§ظ„ط­ط§ظ„ظٹ: {money(await get_balance(uid))}")
-    except Exception:
-        logger.exception("Balance notification failed")
+    await create_and_route_order(message, message.from_user.id, "games", item, target, price, state)
 
-
-async def get_balance(user_id: int) -> int:
-    user = await get_user(user_id)
-    return int(user["balance"]) if user else 0
-
-
-@dp.callback_query(F.data == "adm:settings")
-async def admin_settings(callback: types.CallbackQuery):
-    if not await require_owner_callback(callback):
-        return
-    dollar = await get_setting("dollar_rate", "150")
-    wa = await get_setting("num_whatsapp", "400")
-    tg = await get_setting("num_telegram", "300")
-    text = (
-        "ًں’µ <b>ط§ظ„ط¥ط¹ط¯ط§ط¯ط§طھ ظˆط§ظ„ط£ط³ط¹ط§ط±</b>\nâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\n"
-        f"ًں’± ط³ط¹ط± ط§ظ„ط¯ظˆظ„ط§ط±: <code>{esc(dollar)}</code>\n"
-        f"ًں“± ط³ط¹ط± ط±ظ‚ظ… WhatsApp: <code>{esc(wa)}</code>\n"
-        f"âœˆï¸ڈ ط³ط¹ط± ط±ظ‚ظ… Telegram: <code>{esc(tg)}</code>"
-    )
-    buttons = [
-        [InlineKeyboardButton(text="ًں’± طھط¹ط¯ظٹظ„ ط³ط¹ط± ط§ظ„ط¯ظˆظ„ط§ط±", callback_data="adm:set:dollar_rate")],
-        [InlineKeyboardButton(text="ًں“± طھط¹ط¯ظٹظ„ WhatsApp", callback_data="adm:set:num_whatsapp")],
-        [InlineKeyboardButton(text="âœˆï¸ڈ طھط¹ط¯ظٹظ„ Telegram", callback_data="adm:set:num_telegram")],
-        [InlineKeyboardButton(text="ًں”™ ظ„ظˆط­ط© ط§ظ„ط¥ط¯ط§ط±ط©", callback_data="adm:home")],
-    ]
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-
-@dp.callback_query(F.data.startswith("adm:set:"))
-async def admin_setting_start(callback: types.CallbackQuery, state: FSMContext):
-    if not await require_owner_callback(callback): return
-    key = callback.data.split(":", 2)[2]
-    await state.update_data(setting_key=key)
-    await state.set_state(AdminState.set_setting)
-    await callback.message.edit_text(f"âœڈï¸ڈ ط£ط±ط³ظ„ ط§ظ„ظ‚ظٹظ…ط© ط§ظ„ط¬ط¯ظٹط¯ط© ظ„ظ„ط¥ط¹ط¯ط§ط¯: <code>{esc(key)}</code>", reply_markup=admin_back_keyboard())
-
-
-@dp.message(AdminState.set_setting)
-async def admin_setting_save(message: types.Message, state: FSMContext):
-    if not await is_owner(message.from_user.id): return
-    value = message.text.strip().replace(",", "")
-    if not value or len(value) > 30:
-        await message.answer("â‌Œ ظ‚ظٹظ…ط© ط؛ظٹط± طµط§ظ„ط­ط©.")
-        return
-    data = await state.get_data()
-    await set_setting(data["setting_key"], value)
-    await state.clear()
-    await message.answer("âœ… طھظ… ط­ظپط¸ ط§ظ„ط¥ط¹ط¯ط§ط¯.", reply_markup=admin_main_keyboard())
-
-
-@dp.callback_query(F.data == "adm:staff")
-async def admin_staff(callback: types.CallbackQuery):
-    if not await require_owner_callback(callback): return
-    rows = await get_staff()
-    text = "ًں‘¨â€چًں’¼ <b>ط§ظ„ظ…ظˆط¸ظپظˆظ†</b>\nâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\n"
-    for row in rows:
-        text += f"<code>{row['user_id']}</code> â€” {esc(row['role'])} â€” {'ظپط¹ط§ظ„' if row['active'] else 'ظ…طھظˆظ‚ظپ'}\n"
-    buttons = [
-        [InlineKeyboardButton(text="â‍• ط¥ط¶ط§ظپط© ظ…ظˆط¸ظپ", callback_data="adm:staff:add")],
-        [InlineKeyboardButton(text="â‍– طھط¹ط·ظٹظ„ ظ…ظˆط¸ظپ", callback_data="adm:staff:remove")],
-        [InlineKeyboardButton(text="ًں”™ ظ„ظˆط­ط© ط§ظ„ط¥ط¯ط§ط±ط©", callback_data="adm:home")],
-    ]
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-
-@dp.callback_query(F.data == "adm:staff:add")
-async def admin_staff_add_start(callback: types.CallbackQuery, state: FSMContext):
-    if not await require_owner_callback(callback): return
-    await state.set_state(AdminState.add_staff_id)
-    await callback.message.edit_text("â‍• ط£ط±ط³ظ„ Telegram ID ظ„ظ„ظ…ظˆط¸ظپ.", reply_markup=admin_back_keyboard())
-
-
-@dp.message(AdminState.add_staff_id)
-async def admin_staff_add_id(message: types.Message, state: FSMContext):
-    if not await is_owner(message.from_user.id): return
-    if not message.text or not message.text.isdigit():
-        await message.answer("â‌Œ ط£ط±ط³ظ„ Telegram ID طµط­ظٹط­ط§ظ‹.")
-        return
-    await state.update_data(staff_id=int(message.text))
-    await state.set_state(AdminState.add_staff_role)
-    await message.answer("ط£ط±ط³ظ„ ط§ط³ظ… ط§ظ„طµظ„ط§ط­ظٹط©طŒ ظ…ط«ظ„ط§ظ‹: <code>games</code> ط£ظˆ <code>balance</code> ط£ظˆ <code>staff</code>.")
-
-
-@dp.message(AdminState.add_staff_role)
-async def admin_staff_add_role(message: types.Message, state: FSMContext):
-    if not await is_owner(message.from_user.id): return
-    role = message.text.strip().lower()
-    allowed = {"staff", "wallet", "balance", "games", "accounts", "social", "support"}
-    if role not in allowed:
-        await message.answer("â‌Œ طµظ„ط§ط­ظٹط© ط؛ظٹط± طµط­ظٹط­ط©. ط§ط®طھط±: staff / wallet / balance / games / accounts / social / support")
-        return
-    data = await state.get_data()
-    await add_staff(int(data["staff_id"]), role, message.from_user.id)
-    await state.clear()
-    await message.answer("âœ… طھظ…طھ ط¥ط¶ط§ظپط© ط§ظ„ظ…ظˆط¸ظپ.", reply_markup=admin_main_keyboard())
-
-
-@dp.callback_query(F.data == "adm:staff:remove")
-async def admin_staff_remove_start(callback: types.CallbackQuery, state: FSMContext):
-    if not await require_owner_callback(callback): return
-    await state.set_state(AdminState.block_user_id)
-    await callback.message.edit_text("â‍– ط£ط±ط³ظ„ Telegram ID ظ„ظ„ظ…ظˆط¸ظپ ط§ظ„ط°ظٹ طھط±ظٹط¯ طھط¹ط·ظٹظ„ظ‡.", reply_markup=admin_back_keyboard())
-
-
-@dp.message(AdminState.block_user_id)
-async def admin_staff_remove(message: types.Message, state: FSMContext):
-    if not await is_owner(message.from_user.id): return
-    if not message.text or not message.text.isdigit():
-        await message.answer("â‌Œ ط£ط±ط³ظ„ Telegram ID طµط­ظٹط­ط§ظ‹.")
-        return
-    uid = int(message.text)
-    await remove_staff(uid)
-    await state.clear()
-    await message.answer("âœ… طھظ… طھط¹ط·ظٹظ„ ط§ظ„ظ…ظˆط¸ظپ.", reply_markup=admin_main_keyboard())
-
-
-@dp.callback_query(F.data == "adm:groups")
-async def admin_groups(callback: types.CallbackQuery):
-    if not await require_staff_callback(callback): return
-    text = "ًںڈ¢ <b>ظ…ط¬ظ…ظˆط¹ط§طھ ط§ظ„ط£ظ‚ط³ط§ظ… ط§ظ„ظ…ط±طھط¨ط·ط©</b>\nâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\n"
-    for key, group_id in GROUPS.items():
-        text += f"â€¢ {esc(GROUP_NAMES.get(key,key))}: <code>{group_id}</code>\n"
-    text += "\nظٹطھظ… ط±ط¨ط· ظƒظ„ ط·ظ„ط¨ ط¨ط§ظ„ظ…ط¬ظ…ظˆط¹ط© ط§ظ„ط®ط§طµط© ط¨ظ‚ط³ظ…ظ‡ ط¹ظ†ط¯ ط¥ظ†ط´ط§ط، ط§ظ„ط·ظ„ط¨."
-    await callback.message.edit_text(text, reply_markup=admin_back_keyboard())
-
-
-@dp.callback_query(F.data == "adm:logs")
-async def admin_logs(callback: types.CallbackQuery):
-    if not await require_owner_callback(callback): return
-    async with await db_connect() as db:
-        rows = await fetchall(db, "SELECT * FROM admin_actions ORDER BY id DESC LIMIT 20")
-    text = "ًں“‹ <b>ط¢ط®ط± ط¹ظ…ظ„ظٹط§طھ ط§ظ„ط¥ط¯ط§ط±ط©</b>\nâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\n"
-    for row in rows:
-        text += f"â€¢ <code>{row['admin_id']}</code> â€” {esc(row['action'])} â€” {esc(row['details'])}\n"
-    await callback.message.edit_text(text, reply_markup=admin_back_keyboard())
-
-
-@dp.callback_query(F.data == "adm:broadcast")
-async def admin_broadcast_start(callback: types.CallbackQuery, state: FSMContext):
-    if not await require_owner_callback(callback): return
-    await state.set_state(AdminState.broadcast_text)
-    await callback.message.edit_text("ًں“¢ ط£ط±ط³ظ„ ظ†طµ ط§ظ„ط¥ط¹ظ„ط§ظ† ط§ظ„ط°ظٹ طھط±ظٹط¯ ط¥ط±ط³ط§ظ„ظ‡ ظ„ظ„ظ…ط³طھط®ط¯ظ…ظٹظ†.", reply_markup=admin_back_keyboard())
-
-
-@dp.message(AdminState.broadcast_text)
-async def admin_broadcast_send(message: types.Message, state: FSMContext):
-    if not await is_owner(message.from_user.id): return
-    text = message.text or ""
-    if not text.strip():
-        await message.answer("â‌Œ ط§ظ„ط¥ط¹ظ„ط§ظ† ظپط§ط±ط؛.")
-        return
-    async with await db_connect() as db:
-        rows = await fetchall(db, "SELECT user_id FROM users WHERE is_blocked=0")
-    sent = 0
-    failed = 0
-    for row in rows:
-        try:
-            await bot.send_message(int(row["user_id"]), text)
-            sent += 1
-        except Exception:
-            failed += 1
-        await asyncio.sleep(0.05)
-    await state.clear()
-    await message.answer(f"ًں“¢ ط§ظ†طھظ‡ظ‰ ط§ظ„ط¥ط±ط³ط§ظ„.\nâœ… ظ†ط¬ط­: {sent}\nâ‌Œ ظپط´ظ„: {failed}", reply_markup=admin_main_keyboard())
-
-
-# ============================================================
-# Example order/payment API for service modules
-# ============================================================
-
-async def create_service_order(user_id: int, section: str, service: str, target: str, price: int, quantity=""):
-    return await create_order(user_id, section, service, target, quantity, price)
-
-
-async def show_payment_options(message: types.Message, order_id: int):
-    order = await get_order(order_id)
-    if not order or int(order["user_id"]) != message.from_user.id:
-        await message.answer("â‌Œ ط§ظ„ط·ظ„ط¨ ط؛ظٹط± طµط§ظ„ط­.")
-        return
-    price = int(order["price"] or 0)
-    buttons = []
-    if await get_balance(message.from_user.id) >= price:
-        buttons.append([InlineKeyboardButton(text=f"âڑ، ط§ظ„ط¯ظپط¹ ظ…ظ† ط§ظ„ظ…ط­ظپط¸ط© â€” {money(price)}", callback_data=f"pay_wallet:{order_id}")])
-    buttons.append([InlineKeyboardButton(text="ًں’³ ط§ظ„ط¯ظپط¹ ط¹ط¨ط± ط´ط§ظ… ظƒط§ط´", callback_data=f"pay_sham:{order_id}")])
-    buttons.append([InlineKeyboardButton(text="â‌Œ ط¥ظ„ط؛ط§ط، ط§ظ„ط·ظ„ط¨", callback_data=f"cancel_order:{order_id}")])
-    await message.answer(
-        f"ًں§¾ <b>ط§ظ„ط·ظ„ط¨:</b> <code>{esc(order['order_no'])}</code>\n"
-        f"ًں“¦ <b>ط§ظ„ط®ط¯ظ…ط©:</b> {esc(order['service'])}\n"
-        f"ًں’° <b>ط§ظ„ظ…ط¨ظ„ط؛:</b> {money(price)}\n\nط§ط®طھط± ط·ط±ظٹظ‚ط© ط§ظ„ط¯ظپط¹:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
-
-
-@dp.callback_query(F.data.startswith("pay_wallet:"))
-async def pay_wallet_handler(callback: types.CallbackQuery):
-    order_id = int(callback.data.split(":")[-1])
-    order = await get_order(order_id)
-    if not order or int(order["user_id"]) != callback.from_user.id or order["status"] != "pending_payment":
-        await callback.answer("â‌Œ ط§ظ„ط·ظ„ط¨ ط؛ظٹط± طµط§ظ„ط­ ط£ظˆ طھظ… ط§ظ„طھط¹ط§ظ…ظ„ ظ…ط¹ظ‡.", show_alert=True)
-        return
-    price = int(order["price"] or 0)
-    if not await wallet_debit(callback.from_user.id, price, "order_payment", f"ط¯ظپط¹ ط§ظ„ط·ظ„ط¨ {order['order_no']}", order_id):
-        await callback.answer("â‌Œ ط±طµظٹط¯ ط§ظ„ظ…ط­ظپط¸ط© ط؛ظٹط± ظƒط§ظپظچ.", show_alert=True)
-        return
-    await set_order_status(order_id, "paid", "wallet")
-    await callback.answer("âœ… طھظ… ط§ظ„ط¯ظپط¹ ظ…ظ† ط§ظ„ظ…ط­ظپط¸ط©.")
-    await dispatch_order_to_group(order_id)
-    await callback.message.edit_text(f"âœ… طھظ… ط¯ظپط¹ ط§ظ„ط·ظ„ط¨ <code>{esc(order['order_no'])}</code> ظ…ظ† ط§ظ„ظ…ط­ظپط¸ط© ظˆط¥ط±ط³ط§ظ„ظ‡ ظ„ظ„ط¥ط¯ط§ط±ط©.")
-
-
-@dp.callback_query(F.data.startswith("pay_sham:"))
-async def pay_sham_handler(callback: types.CallbackQuery, state: FSMContext):
-    order_id = int(callback.data.split(":")[-1])
-    order = await get_order(order_id)
-    if not order or int(order["user_id"]) != callback.from_user.id or order["status"] != "pending_payment":
-        await callback.answer("â‌Œ ط§ظ„ط·ظ„ط¨ ط؛ظٹط± طµط§ظ„ط­ ط£ظˆ طھظ… ط§ظ„طھط¹ط§ظ…ظ„ ظ…ط¹ظ‡.", show_alert=True)
-        return
-    await state.update_data(payment_order_id=order_id)
-    await callback.message.edit_text(
-        f"ًں’³ <b>ط§ظ„ط¯ظپط¹ ط¹ط¨ط± ط´ط§ظ… ظƒط§ط´</b>\n\n"
-        f"ًں‘¤ ط§ظ„ط§ط³ظ…: <code>{esc(SHAM_NAME)}</code>\n"
-        f"ًں”— ط§ظ„ط¹ظ†ظˆط§ظ†: <code>{esc(SHAM_ADDR)}</code>\n"
-        f"ًں’° ط§ظ„ظ…ط¨ظ„ط؛: <b>{money(int(order['price']))}</b>\n\n"
-        "ط¨ط¹ط¯ ط§ظ„طھط­ظˆظٹظ„ ط£ط±ط³ظ„ ط±ظ‚ظ… ط¹ظ…ظ„ظٹط© ط§ظ„طھط­ظˆظٹظ„ ظپظٹ ط±ط³ط§ظ„ط© ظˆط§ط­ط¯ط©."
-    )
-    await state.set_state(PaymentState.reference)
-
-
-class PaymentState(StatesGroup):
-    reference = State()
-
-
-@dp.message(PaymentState.reference)
-async def sham_reference_received(message: types.Message, state: FSMContext):
-    if not message.text or len(message.text.strip()) > 100:
-        await message.answer("â‌Œ ط£ط±ط³ظ„ ط±ظ‚ظ… ط¹ظ…ظ„ظٹط© ط§ظ„طھط­ظˆظٹظ„ ظپظ‚ط·.")
-        return
-    data = await state.get_data()
-    order_id = int(data["payment_order_id"])
-    order = await get_order(order_id)
-    if not order or int(order["user_id"]) != message.from_user.id or order["status"] != "pending_payment":
-        await state.clear()
-        await message.answer("â‌Œ ط§ظ„ط·ظ„ط¨ ط؛ظٹط± طµط§ظ„ط­ ط£ظˆ طھظ… ط§ظ„طھط¹ط§ظ…ظ„ ظ…ط¹ظ‡ ظ…ط³ط¨ظ‚ط§ظ‹.")
-        return
-    try:
-        payment_id, payment_no = await create_payment(
-            message.from_user.id,
-            order_id,
-            int(order["price"]),
-            "sham_cash",
-            reference=message.text.strip(),
-        )
-        await state.clear()
-        group_id = int(order["admin_group_id"] or GROUPS["wallet"])
-        admin_message = await bot.send_message(
-            group_id,
-            "ًں’³ <b>ط·ظ„ط¨ ط¯ظپط¹ ط¬ط¯ظٹط¯ ط¨ط§ظ†طھط¸ط§ط± ط§ظ„ظ…ط±ط§ط¬ط¹ط©</b>\nâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\n"
-            f"ًں§¾ ط§ظ„ط¯ظپط¹: <code>{esc(payment_no)}</code>\n"
-            f"ًں“¦ ط§ظ„ط·ظ„ط¨: <code>{esc(order['order_no'])}</code>\n"
-            f"ًں‘¤ ط§ظ„ظ…ط³طھط®ط¯ظ…: <code>{message.from_user.id}</code>\n"
-            f"ًں’° ط§ظ„ظ…ط¨ظ„ط؛: <b>{money(int(order['price']))}</b>\n"
-            f"ًں”¢ ط±ظ‚ظ… ط§ظ„ط¹ظ…ظ„ظٹط©: <code>{esc(message.text.strip())}</code>",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="âœ… ظ‚ط¨ظˆظ„ ط§ظ„ط¯ظپط¹", callback_data=f"adm:approve:{payment_id}"), InlineKeyboardButton(text="â‌Œ ط±ظپط¶ ط§ظ„ط¯ظپط¹", callback_data=f"adm:deny:{payment_id}")]
-            ]),
-        )
-        await attach_admin_message(order_id, group_id, admin_message.message_id)
-        await message.answer(f"âœ… طھظ… ط¥ط±ط³ط§ظ„ ط§ظ„ط¯ظپط¹ط© ظ„ظ„ظ…ط±ط§ط¬ط¹ط©. ط±ظ‚ظ… ط§ظ„ط¯ظپط¹: <code>{esc(payment_no)}</code>")
-    except Exception:
-        logger.exception("Creating manual payment failed")
-        await state.clear()
-        await message.answer("â‌Œ ط­ط¯ط« ط®ط·ط£ ط£ط«ظ†ط§ط، طھط³ط¬ظٹظ„ ط§ظ„ط¯ظپط¹. ظ„ظ… ظٹطھظ… ط§ط¹طھظ…ط§ط¯ ط§ظ„ط·ظ„ط¨.")
-
-
-@dp.callback_query(F.data.startswith("cancel_order:"))
-async def cancel_order_handler(callback: types.CallbackQuery):
-    order_id = int(callback.data.split(":")[-1])
-    ok = await cancel_order(order_id, callback.from_user.id)
-    if not ok:
-        await callback.answer("ظ„ط§ ظٹظ…ظƒظ† ط¥ظ„ط؛ط§ط، ط§ظ„ط·ظ„ط¨ ط¨ظ‡ط°ظ‡ ط§ظ„ط­ط§ظ„ط©.", show_alert=True)
-        return
-    await callback.answer("طھظ… ط¥ظ„ط؛ط§ط، ط§ظ„ط·ظ„ط¨.")
-    await callback.message.edit_text("â‌Œ طھظ… ط¥ظ„ط؛ط§ط، ط§ظ„ط·ظ„ط¨.")
-
-
-async def dispatch_order_to_group(order_id: int):
-    order = await get_order(order_id)
-    if not order:
-        return False
-    group_id = int(order["admin_group_id"] or 0)
-    if not group_id:
-        return False
-    text = (
-        "ًں“¦ <b>ط·ظ„ط¨ ظ…ط¯ظپظˆط¹ ط¬ط¯ظٹط¯</b>\nâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\n"
-        f"ًں†” <code>{esc(order['order_no'])}</code>\n"
-        f"ًں‘¤ ط§ظ„ظ…ط³طھط®ط¯ظ…: <code>{order['user_id']}</code>\n"
-        f"ًںڈ· ط§ظ„ظ‚ط³ظ…: {esc(order['section'])}\n"
-        f"ًں›چ ط§ظ„ط®ط¯ظ…ط©: {esc(order['service'])}\n"
-        f"ًںژ¯ ط§ظ„ظ‡ط¯ظپ: {esc(order['target'])}\n"
-        f"ًں“¦ ط§ظ„ظƒظ…ظٹط©: {esc(order['quantity'])}\n"
-        f"ًں’° ط§ظ„ط³ط¹ط±: <b>{money(int(order['price']))}</b>\n"
-        f"ًں’³ ط§ظ„ط¯ظپط¹: {esc(order['payment_method'] or '')}\n"
-        "ًں“Œ ط§ظ„ط­ط§ظ„ط©: <b>ظ…ط¯ظپظˆط¹ - ط¨ط§ظ†طھط¸ط§ط± ط§ظ„طھظ†ظپظٹط°</b>"
-    )
-    msg = await bot.send_message(group_id, text, reply_markup=await order_admin_keyboard(order))
-    await attach_admin_message(order_id, group_id, msg.message_id)
-    return True
-
-
-# ============================================================
-# Safety: block ordinary messages from reaching admin FSM handlers
-# and startup
-# ============================================================
-
-@dp.message()
-async def fallback_message(message: types.Message):
-    user = await get_user(message.from_user.id)
-    if user and int(user["is_blocked"]) == 1:
-        return
-    if await is_staff(message.from_user.id) and message.text == "ظ„ظˆط­ط© ط§ظ„ط¥ط¯ط§ط±ط©":
-        await message.answer(await admin_panel_message(message.from_user.id), reply_markup=admin_main_keyboard())
-        return
-    await message.answer("ط§ط³طھط®ط¯ظ… /start ظ„ظ„ط¹ظˆط¯ط© ط¥ظ„ظ‰ ط§ظ„ظ‚ط§ط¦ظ…ط© ط§ظ„ط±ط¦ظٹط³ظٹط©.")
-
-
-async def health_check():
-    async with await db_connect() as db:
-        await fetchone(db, "SELECT 1")
-    await bot.get_me()
-
-
+# =====================================================================
+# 9. نقطة الإقلاع والتشغيل
+# =====================================================================
 async def main():
     await init_db()
-    await health_check()
-    logger.info("Bot starting")
+    await bot.delete_webhook(drop_pending_updates=True)
+    logging.info("🚀 Syria Store Core V2 Engine is starting...")
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
