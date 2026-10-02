@@ -32,7 +32,7 @@ if not BOT_TOKEN:
     # ضع التوكن هنا أو مرره كمتغير بيئة
     BOT_TOKEN = "8774564171:AAE_kxJM-yZ97f52_dTGwnKTLyfvsARM5Ik"
 
-ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))  # ضع آيدي حسابك الحقيقي هنا
+ADMIN_ID = int(os.getenv("ADMIN_ID", "5346581925"))  # ضع آيدي حسابك الحقيقي هنا
 CHANNEL_ID = -1004492385043
 CHANNEL_LINK = "https://t.me/SyriaStore_ch"
 
