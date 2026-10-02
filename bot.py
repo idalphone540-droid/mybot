@@ -28,7 +28,7 @@ from aiogram.types import (
 # 1. الإعدادات والمتغيرات الأساسية
 # =====================================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8774564171:AAE_kxJM-yZ97f52_dTGwnKTLyfvsARM5Ik")
-ADMIN_ID = 5346581925  # آيدي الأدمن الخاص بك تم تثبيته هنا
+ADMIN_ID = 5346581925  # آيدي الأدمن الأساسي
 
 CHANNEL_ID = -1004492385043
 CHANNEL_LINK = "https://t.me/SyriaStore_ch"
@@ -54,7 +54,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 
-# قفل لمنع التزامن والسباق على مستوى الذاكرة
 wallet_locks = {}
 
 def get_user_lock(user_id: int) -> asyncio.Lock:
@@ -67,14 +66,44 @@ def generate_uid(prefix: str = "ORD") -> str:
     return f"{prefix}-{int(time.time()) % 1000000:06d}-{suffix}"
 
 # =====================================================================
-# 2. طبقة قاعدة البيانات والدفتر المحاسبي (Database & Ledger)
+# 2. كتالوج وبيانات قسم الرصيد والكاش
+# =====================================================================
+GOVERNORATES = [
+    "دمشق", "ريف دمشق", "حمص", "ريف حمص", "حماة", "ريف حماة",
+    "طرطوس", "درعا", "اللاذقية", "ريف اللاذقية", "حلب", "القامشلي",
+    "الرقة", "دير الزور", "البوكمال", "الحسكة", "السويداء", "القنيطرة",
+    "إدلب", "جبلة", "القلمون"
+]
+
+SYR_UNITS = [
+    (9.61, 12), (20.19, 25), (30.76, 40), (40.38, 50), (52.88, 65),
+    (62.50, 75), (77.88, 95), (81.73, 100), (100.96, 125), (125, 150),
+    (160.57, 200), (192.3, 240), (211.53, 265), (240.38, 300), (288.46, 360),
+    (317.3, 400), (370.19, 450), (432.69, 530), (480.76, 600), (576.92, 720),
+    (625, 780), (721.15, 895), (769.23, 950), (951.92, 1180), (1057.69, 1300),
+    (1923.07, 2380), (2403.84, 3000), (3846.15, 4770)
+]
+
+MTN_UNITS = [
+    (10, 12), (12, 15), (15, 20), (20, 25), (25, 30), (30, 40), (35, 45),
+    (40, 50), (50, 60), (60, 75), (85, 105), (100, 125), (170, 210), (200, 250),
+    (280, 350), (360, 450), (400, 500), (600, 750), (750, 930), (1000, 1250),
+    (1500, 1860), (2000, 2500), (2500, 3010), (3000, 3750), (5000, 6200)
+]
+
+STATION_VALS = [
+    (500, 535), (1000, 1070), (1500, 1605), (2000, 2140), (2500, 2675),
+    (3000, 3210), (4000, 4280), (5000, 5350), (10000, 10700)
+]
+
+# =====================================================================
+# 3. طبقة قاعدة البيانات
 # =====================================================================
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA journal_mode = WAL;")
         await db.execute("PRAGMA foreign_keys = ON;")
 
-        # 1. جدول المستخدمين
         await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -89,7 +118,6 @@ async def init_db():
         );
         """)
 
-        # 2. جدول الطلبات الموحد
         await db.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             order_id TEXT PRIMARY KEY,
@@ -104,7 +132,6 @@ async def init_db():
         );
         """)
 
-        # 3. جدول المدفوعات والشام كاش
         await db.execute("""
         CREATE TABLE IF NOT EXISTS payments (
             payment_id TEXT PRIMARY KEY,
@@ -121,7 +148,6 @@ async def init_db():
         );
         """)
 
-        # 4. الدفتر المحاسبي للمحفظة (Ledger)
         await db.execute("""
         CREATE TABLE IF NOT EXISTS wallet_ledger (
             ledger_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,7 +162,6 @@ async def init_db():
         );
         """)
 
-        # 5. الإعدادات
         await db.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
@@ -144,13 +169,11 @@ async def init_db():
         );
         """)
         await db.execute("INSERT OR IGNORE INTO settings (key, val) VALUES ('dollar_rate', 150.0);")
-        
-        # التأكد من ترقية حسابك كمدير في قاعدة البيانات عند التهيئة
         await db.execute("UPDATE users SET role = 'ADMIN' WHERE user_id = ?", (ADMIN_ID,))
         await db.commit()
 
 # =====================================================================
-# 3. خدمات المحفظة والعمليات المالية الذرية (Wallet Service)
+# 4. محرك المحفظة والعمليات المالية
 # =====================================================================
 class WalletService:
     @staticmethod
@@ -167,7 +190,6 @@ class WalletService:
                 await db.commit()
                 return (user_id, username, 0, 0, 0, role, None)
             
-            # تحديث الرتبة في حال كان المستخدم هو الآدمن
             if user_id == ADMIN_ID and row[5] != "ADMIN":
                 await db.execute("UPDATE users SET role = 'ADMIN' WHERE user_id = ?", (user_id,))
                 await db.commit()
@@ -258,10 +280,27 @@ class WalletService:
                     return False, 0, 0
 
 # =====================================================================
-# 4. الحالات FSM
+# 5. الحالات FSM
 # =====================================================================
+class BalanceState(StatesGroup):
+    syr_units_phone = State()
+    syr_station_code = State()
+    syr_station_gov = State()
+    syr_invoice_num = State()
+    syr_invoice_amt = State()
+    syr_cash_amt = State()
+    syr_cash_id = State()
+
+    mtn_units_phone = State()
+    mtn_station_code = State()
+    mtn_station_num = State()
+    mtn_station_gov = State()
+    mtn_invoice_num = State()
+    mtn_invoice_amt = State()
+    mtn_cash_amt = State()
+    mtn_cash_num = State()
+
 class ClientOrder(StatesGroup):
-    inputting_data = State()
     manual_receipt = State()
 
 class WalletFlow(StatesGroup):
@@ -269,14 +308,8 @@ class WalletFlow(StatesGroup):
     receipt = State()
     tx_code = State()
 
-class AdminFlow(StatesGroup):
-    broadcast = State()
-    edit_rate = State()
-    add_balance_user = State()
-    add_balance_amt = State()
-
 # =====================================================================
-# 5. واجهة العميل (Client Interface)
+# 6. واجهة العميل والقوائم
 # =====================================================================
 def client_main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -308,8 +341,7 @@ async def start_handler(message: types.Message, state: FSMContext):
         f"━━━━━━━━━━━━━━━━━━\n"
         f"اختر القسم المطلوب للبدء فوراً:"
     )
-    kb = client_main_kb()
-    await message.answer(text, reply_markup=kb)
+    await message.answer(text, reply_markup=client_main_kb())
 
 # ----------------- دورة شحن المحفظة -----------------
 @dp.callback_query(F.data == "client:wallet")
@@ -346,7 +378,7 @@ async def wallet_amt_rec(message: types.Message, state: FSMContext):
             f"🧾 <b>طلب شحن محفظة بقيمة: {amt:,} ل.س</b>\n\n"
             f"👤 الاسم: <code>{html.escape(SHAM_NAME)}</code>\n"
             f"🔗 العنوان: <code>{html.escape(SHAM_ADDR)}</code>\n\n"
-            f"⚠️️ قم بالتحويل، ثم <b>أرسل رقم العملية (Transaction ID) الخاص بشام كاش هنا</b>:"
+            f"⚠️ قم بالتحويل، ثم <b>أرسل رقم العملية (Transaction ID) الخاص بشام كاش هنا</b>:"
         )
     except Exception:
         await message.reply("⚠️ يرجى إدخال مبلغ صحيح بالأرقام:")
@@ -525,8 +557,249 @@ async def pay_manual_receipt_rec(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ تم إرسال إشعار الدفع للإدارة! سيتم إشعارك فور تدقيقه وتنفيذه.")
 
+@dp.callback_query(F.data.startswith("pay:c:"))
+async def pay_cancel_order(cb: types.CallbackQuery, state: FSMContext):
+    ord_id = cb.data.split(":")[2]
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE orders SET status = 'REJECTED' WHERE order_id = ?", (ord_id,))
+        await db.commit()
+    await state.clear()
+    await cb.message.edit_text("❌ تم إلغاء الطلب.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 القائمة الرئيسية", callback_data="back_home")]]))
+
 # =====================================================================
-# 6. إجراءات الموظفين والمجموعات (Staff Order Actions)
+# 7. دمج قسم الرصيد والكاش (سيريتل Syriatel + إم تي إن MTN)
+# =====================================================================
+@dp.callback_query(F.data == "sec:balance")
+async def balance_home(cb: types.CallbackQuery):
+    kb = [
+        [InlineKeyboardButton(text="🔴 سيريتل (Syriatel)", callback_data="net:syr")],
+        [InlineKeyboardButton(text="🟡 إم تي إن (MTN)", callback_data="net:mtn")],
+        [InlineKeyboardButton(text="🔙 القائمة الرئيسية", callback_data="back_home")]
+    ]
+    await cb.message.edit_text("📞 <b>اختر الشبكة المطلوبة:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@dp.callback_query(F.data.startswith("net:"))
+async def net_menu_view(cb: types.CallbackQuery):
+    net = cb.data.split(":")[1]
+    name = "Syriatel" if net == "syr" else "MTN"
+    kb = [
+        [InlineKeyboardButton(text=f"📲 وحدات {name}", callback_data=f"bopt:{net}:units")],
+        [InlineKeyboardButton(text=f"⛽ جملة {name} كازية", callback_data=f"bopt:{net}:station")],
+        [InlineKeyboardButton(text=f"🧾 فواتير {name}", callback_data=f"bopt:{net}:invoice")],
+        [InlineKeyboardButton(text=f"💵 كاش {name}", callback_data=f"bopt:{net}:cash")],
+        [InlineKeyboardButton(text="🔙 رجوع", callback_data="sec:balance")]
+    ]
+    await cb.message.edit_text(f"📞 <b>خدمات شبكة {name}:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@dp.callback_query(F.data.startswith("bopt:"))
+async def handle_balance_options(cb: types.CallbackQuery, state: FSMContext):
+    _, net, opt = cb.data.split(":")
+    net_name = "Syriatel" if net == "syr" else "MTN"
+
+    if opt == "units":
+        items = SYR_UNITS if net == "syr" else MTN_UNITS
+        buttons = []
+        for idx, (u, p) in enumerate(items):
+            buttons.append(InlineKeyboardButton(text=f"{u} ⬅ {p:,} ل.س", callback_data=f"bu_{net}_{idx}"))
+        rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+        rows.append([InlineKeyboardButton(text="🔙 رجوع", callback_data=f"net:{net}")])
+        await cb.message.edit_text(f"📲 <b>اختر فئة وحدات {net_name}:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+    elif opt == "station":
+        buttons = []
+        for idx, (a, p) in enumerate(STATION_VALS):
+            buttons.append(InlineKeyboardButton(text=f"فئة {a:,} ⬅ {p:,} ل.س", callback_data=f"bs_{net}_{idx}"))
+        rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+        rows.append([InlineKeyboardButton(text="🔙 رجوع", callback_data=f"net:{net}")])
+        await cb.message.edit_text(f"⛽ <b>اختر فئة كازية {net_name}:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+    elif opt == "invoice":
+        await state.update_data(net=net, s_title=f"فاتورة {net_name}")
+        if net == "syr":
+            await state.set_state(BalanceState.syr_invoice_num)
+            await cb.message.edit_text("🧾 أدخل رقم فاتورة Syriatel:")
+        else:
+            await state.set_state(BalanceState.mtn_invoice_num)
+            await cb.message.edit_text("🧾 أدخل رقم فاتورة MTN:")
+
+    elif opt == "cash":
+        await state.update_data(net=net, s_title=f"كاش {net_name}")
+        if net == "syr":
+            await state.set_state(BalanceState.syr_cash_amt)
+            await cb.message.edit_text("💵 أدخل كمية كاش Syriatel المطلوبة (أقل كمية 1,000 ل.س):")
+        else:
+            await state.set_state(BalanceState.mtn_cash_amt)
+            await cb.message.edit_text("💵 أدخل كمية كاش MTN المطلوبة (أقل كمية 1,000 ل.س):")
+
+# 1. طلبات الوحدات
+@dp.callback_query(F.data.startswith("bu_"))
+async def sel_units_pack(cb: types.CallbackQuery, state: FSMContext):
+    _, net, idx = cb.data.split("_")
+    items = SYR_UNITS if net == "syr" else MTN_UNITS
+    u, p = items[int(idx)]
+    await state.update_data(s_title=f"وحدات {net.upper()} ({u})", s_price=int(p))
+    if net == "syr":
+        await state.set_state(BalanceState.syr_units_phone)
+        await cb.message.edit_text("📱 أدخل رقم سيريتل المطلوب التحويل إليه (10 خانات تبدأ بـ 09):")
+    else:
+        await state.set_state(BalanceState.mtn_units_phone)
+        await cb.message.edit_text("📱 أدخل رقم MTN المطلوب التحويل إليه (10 خانات تبدأ بـ 09):")
+
+@dp.message(BalanceState.syr_units_phone)
+async def proc_syr_phone(message: types.Message, state: FSMContext):
+    p = message.text.strip()
+    if not (p.isdigit() and len(p) == 10 and p.startswith("09")):
+        await message.reply("⚠️ رقم سيريتل يجب أن يكون مؤلفاً من 10 خانات ويبدأ بـ 09:")
+        return
+    data = await state.get_data()
+    await create_and_route_order(message, message.from_user.id, "balance", data["s_title"], f"رقم سيريتل: {p}", data["s_price"], state)
+
+@dp.message(BalanceState.mtn_units_phone)
+async def proc_mtn_phone(message: types.Message, state: FSMContext):
+    p = message.text.strip()
+    if not (p.isdigit() and len(p) == 10 and p.startswith("09")):
+        await message.reply("⚠️ رقم MTN يجب أن يكون مؤلفاً من 10 خانات ويبدأ بـ 09:")
+        return
+    data = await state.get_data()
+    await create_and_route_order(message, message.from_user.id, "balance", data["s_title"], f"رقم MTN: {p}", data["s_price"], state)
+
+# 2. طلبات الكازية
+@dp.callback_query(F.data.startswith("bs_"))
+async def sel_station_pack(cb: types.CallbackQuery, state: FSMContext):
+    _, net, idx = cb.data.split("_")
+    a, p = STATION_VALS[int(idx)]
+    await state.update_data(s_title=f"جملة كازية {net.upper()} (فئة {a})", s_price=int(p))
+    if net == "syr":
+        await state.set_state(BalanceState.syr_station_code)
+        await cb.message.edit_text("⛽ أدخل كود كازية Syriatel (مؤلف من 6 أرقام):")
+    else:
+        await state.set_state(BalanceState.mtn_station_code)
+        await cb.message.edit_text("⛽ أدخل كود كازية MTN:")
+
+@dp.message(BalanceState.syr_station_code)
+async def proc_syr_st_code(message: types.Message, state: FSMContext):
+    code = message.text.strip()
+    if not (code.isdigit() and len(code) == 6):
+        await message.reply("⚠️ كود كازية سيريتل يجب أن يتكون من 6 أرقام حصراً:")
+        return
+    await state.update_data(st_code=code)
+    await state.set_state(BalanceState.syr_station_gov)
+    buttons = [InlineKeyboardButton(text=g, callback_data=f"sgov_syr:{g}") for g in GOVERNORATES]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    await message.answer("📍 اختر المحافظة:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+@dp.callback_query(F.data.startswith("sgov_syr:"), BalanceState.syr_station_gov)
+async def proc_syr_st_gov(cb: types.CallbackQuery, state: FSMContext):
+    gov = cb.data.split(":")[1]
+    data = await state.get_data()
+    target_info = f"كود كازية: {data['st_code']} | المحافظة: {gov}"
+    await create_and_route_order(cb, cb.from_user.id, "balance", data["s_title"], target_info, data["s_price"], state)
+
+@dp.message(BalanceState.mtn_station_code)
+async def proc_mtn_st_code(message: types.Message, state: FSMContext):
+    await state.update_data(st_code=message.text.strip())
+    await state.set_state(BalanceState.mtn_station_num)
+    await message.answer("⛽ أدخل رقم كازية MTN:")
+
+@dp.message(BalanceState.mtn_station_num)
+async def proc_mtn_st_num(message: types.Message, state: FSMContext):
+    await state.update_data(st_num=message.text.strip())
+    await state.set_state(BalanceState.mtn_station_gov)
+    buttons = [InlineKeyboardButton(text=g, callback_data=f"sgov_mtn:{g}") for g in GOVERNORATES]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    await message.answer("📍 اختر المحافظة:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+@dp.callback_query(F.data.startswith("sgov_mtn:"), BalanceState.mtn_station_gov)
+async def proc_mtn_st_gov(cb: types.CallbackQuery, state: FSMContext):
+    gov = cb.data.split(":")[1]
+    data = await state.get_data()
+    target_info = f"كود: {data['st_code']} | رقم: {data['st_num']} | المحافظة: {gov}"
+    await create_and_route_order(cb, cb.from_user.id, "balance", data["s_title"], target_info, data["s_price"], state)
+
+# 3. طلبات الفواتير
+@dp.message(BalanceState.syr_invoice_num)
+async def proc_syr_inv_num(message: types.Message, state: FSMContext):
+    await state.update_data(inv_num=message.text.strip())
+    await state.set_state(BalanceState.syr_invoice_amt)
+    await message.answer("💵 أدخل قيمة الفاتورة بالليرة السورية:")
+
+@dp.message(BalanceState.syr_invoice_amt)
+async def proc_syr_inv_amt(message: types.Message, state: FSMContext):
+    try:
+        amt = int(message.text.strip().replace(",", ""))
+        if amt <= 0:
+            await message.reply("⚠️ القيمة يجب أن تكون أكبر من صفر:")
+            return
+        final_price = round(amt * 1.05)
+        data = await state.get_data()
+        target_info = f"رقم فاتورة Syriatel: {data['inv_num']} | القيمة: {amt:,}"
+        await create_and_route_order(message, message.from_user.id, "balance", data["s_title"], target_info, final_price, state)
+    except Exception:
+        await message.reply("⚠️ أدخل قيمة صحيحة بالأرقام:")
+
+@dp.message(BalanceState.mtn_invoice_num)
+async def proc_mtn_inv_num(message: types.Message, state: FSMContext):
+    await state.update_data(inv_num=message.text.strip())
+    await state.set_state(BalanceState.mtn_invoice_amt)
+    await message.answer("💵 أدخل قيمة الفاتورة بالليرة السورية:")
+
+@dp.message(BalanceState.mtn_invoice_amt)
+async def proc_mtn_inv_amt(message: types.Message, state: FSMContext):
+    try:
+        amt = int(message.text.strip().replace(",", ""))
+        if amt <= 0:
+            await message.reply("⚠️ القيمة يجب أن تكون أكبر من صفر:")
+            return
+        final_price = round(amt * 1.05)
+        data = await state.get_data()
+        target_info = f"رقم فاتورة MTN: {data['inv_num']} | القيمة: {amt:,}"
+        await create_and_route_order(message, message.from_user.id, "balance", data["s_title"], target_info, final_price, state)
+    except Exception:
+        await message.reply("⚠️ أدخل قيمة صحيحة بالأرقام:")
+
+# 4. طلبات الكاش
+@dp.message(BalanceState.syr_cash_amt)
+async def proc_syr_cash_amt(message: types.Message, state: FSMContext):
+    try:
+        amt = int(message.text.strip().replace(",", ""))
+        if amt < 1000:
+            await message.reply("⚠️ الحد الأدنى للكاش هو 1,000 ل.س:")
+            return
+        final_price = round(amt * 1.05)
+        await state.update_data(c_amt=amt, c_price=final_price)
+        await state.set_state(BalanceState.syr_cash_id)
+        await message.answer("👤 أدخل معرّف Player-ID لاستلام كاش Syriatel:")
+    except Exception:
+        await message.reply("⚠️ أدخل قيمة صحيحة بالأرقام:")
+
+@dp.message(BalanceState.syr_cash_id)
+async def proc_syr_cash_id(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    target_info = f"Player-ID: {message.text.strip()} | الكمية: {data['c_amt']:,}"
+    await create_and_route_order(message, message.from_user.id, "balance", data["s_title"], target_info, data["c_price"], state)
+
+@dp.message(BalanceState.mtn_cash_amt)
+async def proc_mtn_cash_amt(message: types.Message, state: FSMContext):
+    try:
+        amt = int(message.text.strip().replace(",", ""))
+        if amt < 1000:
+            await message.reply("⚠️ الحد الأدنى للكاش هو 1,000 ل.س:")
+            return
+        final_price = round(amt * 1.05)
+        await state.update_data(c_amt=amt, c_price=final_price)
+        await state.set_state(BalanceState.mtn_cash_num)
+        await message.answer("📱 أدخل رقم كاش MTN المطلوب التحويل إليه:")
+    except Exception:
+        await message.reply("⚠️️ أدخل قيمة صحيحة بالأرقام:")
+
+@dp.message(BalanceState.mtn_cash_num)
+async def proc_mtn_cash_num(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    target_info = f"رقم كاش MTN: {message.text.strip()} | الكمية: {data['c_amt']:,}"
+    await create_and_route_order(message, message.from_user.id, "balance", data["s_title"], target_info, data["c_price"], state)
+
+# =====================================================================
+# 8. إجراءات الموظفين والمجموعات
 # =====================================================================
 @dp.callback_query(F.data.startswith("ord_act:"))
 async def handle_staff_order_action(cb: types.CallbackQuery):
@@ -613,7 +886,7 @@ async def admin_group_direct_reply(message: types.Message):
             await message.reply(f"⚠️ تعذر الإرسال: {e}")
 
 # =====================================================================
-# 7. لوحة الإدارة الشاملة (/admin) - فحص مباشر وترقية فورية
+# 9. لوحة الإدارة الشاملة (/admin)
 # =====================================================================
 @dp.message(Command("admin"))
 async def admin_panel_start(message: types.Message):
@@ -621,7 +894,6 @@ async def admin_panel_start(message: types.Message):
         await message.reply("⛔ هذا الأمر مخصص للمدير العام فقط!")
         return
 
-    # ترقية فورية في قاعدة البيانات لضمان الصلاحيات
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET role = 'ADMIN' WHERE user_id = ?", (ADMIN_ID,))
         await db.commit()
@@ -692,40 +964,12 @@ async def back_to_home_cb(cb: types.CallbackQuery, state: FSMContext):
     await cb.message.edit_text(text, reply_markup=client_main_kb())
 
 # =====================================================================
-# 8. نموذج تجريبي لقسم الشحن
-# =====================================================================
-@dp.callback_query(F.data == "sec:games")
-async def test_game_menu(cb: types.CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔫 ببجي: 60 UC (15,000 ل.س)", callback_data="demo_buy:pubg_60:15000:ببجي 60 UC")],
-        [InlineKeyboardButton(text="🔫 ببجي: 325 UC (75,000 ل.س)", callback_data="demo_buy:pubg_325:75000:ببجي 325 UC")],
-        [InlineKeyboardButton(text="🔙 رجوع", callback_data="back_home")]
-    ])
-    await cb.message.edit_text("اختر الباقة التجريبية لاختبار دورة الطلب:", reply_markup=kb)
-
-@dp.callback_query(F.data.startswith("demo_buy:"))
-async def test_game_buy(cb: types.CallbackQuery, state: FSMContext):
-    _, code, price, title = cb.data.split(":")
-    await state.update_data(demo_item=title, demo_price=int(price))
-    await state.set_state(ClientOrder.inputting_data)
-    await cb.message.edit_text(f"أدخل الآيدي (Player ID) واسمك داخل اللعبة لشحن <b>{title}</b>:")
-
-@dp.message(ClientOrder.inputting_data)
-async def test_game_input_done(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    item = data["demo_item"]
-    price = data["demo_price"]
-    target = message.text.strip()
-    await state.clear()
-    await create_and_route_order(message, message.from_user.id, "games", item, target, price, state)
-
-# =====================================================================
-# 9. نقطة الإقلاع والتشغيل
+# 10. نقطة الإقلاع والتشغيل
 # =====================================================================
 async def main():
     await init_db()
     await bot.delete_webhook(drop_pending_updates=True)
-    logging.info("🚀 Syria Store Core V2 Engine is starting...")
+    logging.info("🚀 Syria Store Core V2 Engine is starting with Balance Section...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
