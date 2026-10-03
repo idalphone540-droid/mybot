@@ -4,7 +4,7 @@ aiogram 3.x + aiosqlite
 
 التشغيل:
     pip install -U aiogram aiosqlite
-    export BOT_TOKEN="8774564171:AAGpWz69WLB76vYsLkPXIXiLOO-3rWt2RiQ"        # إلزامي (لا تضعه داخل الكود أبداً)
+    export BOT_TOKEN=""        # إلزامي (لا تضعه داخل الكود أبداً)
     export ADMIN_ID="5346581925"   # اختياري
     python syria_store_bot.py
 """
