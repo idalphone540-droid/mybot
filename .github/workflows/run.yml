@@ -22,5 +22,6 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run bot script
+        env:
+          BOT_TOKEN: "8774564171:AAFJD4FersBnIbU3n_gq6MikF3W8zRu0x54"
         run: python syria_store_bot.py
-        
