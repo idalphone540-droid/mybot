@@ -4,7 +4,7 @@ aiogram 3.x + aiosqlite
 
 التشغيل:
     pip install -U aiogram aiosqlite
-    export BOT_TOKEN=""        # إلزامي (لا تضعه داخل الكود أبداً)
+    export BOT_TOKEN="xxxx"        # إلزامي (لا تضعه داخل الكود أبداً)
     export ADMIN_ID="5346581925"   # اختياري
     python syria_store_bot.py
 """
@@ -12,6 +12,7 @@ import asyncio
 import html
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -64,6 +65,8 @@ SHAM_NAME = "سكينه حمود طه"
 SHAM_ADDR = "be03739e320f3dfd318a1a7faebae16a"
 QR_IMAGE_PATH = "qr_sham.jpg"
 DB_PATH = os.getenv("DB_PATH", "syria_store_v2.db")
+DEFAULT_MARGIN = float(os.getenv("DEFAULT_MARGIN", "25"))
+DEFAULT_DOLLAR_RATE = float(os.getenv("DOLLAR_RATE", "150"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("syria_store")
@@ -109,47 +112,577 @@ STATION_VALS = [
     (3000, 3210), (4000, 4280), (5000, 5350), (10000, 10700),
 ]
 
-GAME_PACKS = {
-    "pubg": [("60 UC", 1.0), ("325 UC", 5.0), ("660 UC", 10.0), ("1800 UC", 25.0), ("3850 UC", 50.0), ("8100 UC", 100.0)],
-    "ff": [("100 جوهرة", 1.0), ("210 جوهرة", 2.0), ("530 جوهرة", 5.0), ("1080 جوهرة", 10.0), ("2200 جوهرة", 20.0), ("5600 جوهرة", 50.0)],
-    "jawaker": [("15,000 توكنز", 1.5), ("50,000 توكنز", 4.0), ("150,000 توكنز", 10.0), ("باشا (شهر)", 6.0)],
-    "coc": [("500 جوهرة", 5.0), ("1200 جوهرة", 10.0), ("2500 جوهرة", 20.0), ("6500 جوهرة", 50.0), ("14000 جوهرة", 100.0)],
+# ---------------------------------------------------------------------
+# كتالوج الألعاب — أسعار الجملة بالدولار (التكلفة عليك).
+# سعر البيع = الجملة × سعر الدولار × (1 + نسبة ربح الألعاب) — تُضبط من /admin
+# لتعديل سعر أو إضافة فئة: عدّل السطر فقط. صيغة الفئة: ("الاسم", السعر_بالدولار)
+# ---------------------------------------------------------------------
+GAMES_CATALOG = {
+    "pubg": {
+        "emoji": "🔫", "name": "ببجي موبايل (PUBG)",
+        "ask": "أرسل آيدي اللاعب:",
+        "packs": [
+            ("60 شدة", 1.0), ("120 شدة", 2.0), ("180 شدة", 3.0), ("300+25 شدة", 5.0),
+            ("385 شدة", 6.0), ("600+60 شدة", 10.0), ("720 شدة", 11.0), ("985 شدة", 15.0),
+            ("1320 شدة", 20.0), ("1500+300 شدة", 25.0), ("2125 شدة", 30.0),
+            ("3000+850 شدة", 50.0), ("4510 شدة", 60.0), ("6000+2100 شدة", 100.0),
+            ("10020 شدة", 125.0),
+        ],
+    },
+    "ff": {
+        "emoji": "🔥", "name": "فري فاير (جواهر)",
+        "ask": "أرسل آيدي اللاعب:",
+        "packs": [
+            ("100+10 جوهرة", 1.0), ("210+20 جوهرة", 2.0), ("340 جوهرة", 3.3),
+            ("460 جوهرة", 4.4), ("530+51 جوهرة", 5.5), ("811 جوهرة", 7.7),
+            ("1080+120 جوهرة", 11.0), ("1162 جوهرة", 12.0), ("2200+240 جوهرة", 22.0),
+            ("3641 جوهرة", 33.0), ("4880 جوهرة", 44.0),
+        ],
+    },
+    "ffm": {
+        "emoji": "🎖", "name": "فري فاير (عضويات)",
+        "ask": "أرسل آيدي اللاعب:",
+        "packs": [
+            ("ترقية المستوى 6", 0.46), ("ترقية المستوى 10", 0.69), ("ترقية المستوى 15", 0.69),
+            ("ترقية المستوى 20", 0.69), ("ترقية المستوى 25", 0.69), ("ترقية المستوى 30", 1.03),
+            ("عضوية أسبوعية", 2.71), ("تصريح بوياه", 3.37), ("عضوية شهرية", 10.94),
+            ("لفة 50 أسلحة (جينتوكي)", 16.68), ("لفات أسلحة إيفو (EVO VAULT)", 16.68),
+        ],
+    },
+    "coc": {
+        "emoji": "⚔️", "name": "كلاش أوف كلانس (CoC)",
+        "ask": "أرسل الإيميل الذي تريد التفعيل عليه + رقم للتواصل:",
+        "packs": [
+            ("80 مجوهرة", 1.03), ("منتج بقيمة 0.99", 1.55), ("منتج بقيمة 2.99", 4.13),
+            ("500 مجوهرة", 5.16), ("منتج بقيمة 3.99", 5.16), ("منتج بقيمة 4.99", 6.19),
+            ("التذكرة الذهبية", 7.22), ("منتج بقيمة 6.99", 8.26), ("المناظر (سكنات القرية)", 8.26),
+            ("المظاهر (سكنات الملوك)", 8.26), ("1200 مجوهرة", 10.32), ("منتج بقيمة 9.99", 11.35),
+            ("تذكرة الحدث", 12.39), ("منتج بقيمة 12.99", 14.45), ("منتج بقيمة 14.99", 16.51),
+            ("2500 مجوهرة", 20.64), ("منتج بقيمة 19.99", 21.67),
+        ],
+    },
+    "cr": {
+        "emoji": "👑", "name": "كلاش رويال",
+        "ask": "أرسل الإيميل الذي تريد التفعيل عليه + رقم للتواصل:",
+        "packs": [
+            ("80 جوهرة", 1.03), ("500 جوهرة", 5.16), ("التذكرة المصغرة", 6.19),
+            ("1200 جوهرة", 10.32), ("التذكرة الماسية", 12.39), ("2500 جوهرة", 20.64),
+        ],
+    },
+    "brawl": {
+        "emoji": "💥", "name": "براول ستارز",
+        "ask": "أرسل الإيميل الذي تريد التفعيل عليه + رقم للتواصل:",
+        "packs": [
+            ("30 جوهرة", 2.06), ("80 جوهرة", 5.16), ("منتج بقيمة 3.99", 5.16),
+            ("منتج بقيمة 4.99", 6.19), ("منتج بقيمة 5.99", 7.22), ("منتج بقيمة 6.99", 8.26),
+            ("Brawl Pass", 9.29), ("المظاهر (السكنات)", 9.29), ("منتج بقيمة 7.99", 9.29),
+            ("170 جوهرة", 10.32), ("منتج بقيمة 8.99", 10.32), ("منتج بقيمة 9.99", 11.35),
+            ("Brawl Pass Plus", 13.42), ("المظاهر (السكنات) - فئة 2", 16.51),
+            ("360 جوهرة", 20.64), ("Brawl Pass Pro", 25.80), ("950 جوهرة", 51.61),
+            ("2000 جوهرة", 103.21),
+        ],
+    },
+    "hayday": {
+        "emoji": "🌾", "name": "هاي داي (Hay Day)",
+        "ask": "أرسل الإيميل الذي تريد التفعيل عليه + رقم للتواصل:",
+        "packs": [
+            ("50+5 جوهرة", 2.06), ("130+13 جوهرة", 5.16), ("275+28 جوهرة", 10.32),
+            ("فارم باس", 12.39), ("فارم باس بلاس", 18.58), ("570+57 جوهرة", 20.64),
+        ],
+    },
+    "jawaker": {
+        "emoji": "🃏", "name": "جواكر (Jawaker)",
+        "ask": "أرسل آيدي اللاعب:",
+        "tokens": {"min": 10000, "unit_syp": 0.150},  # شحن توكنز بالكمية (سعر الجملة بالليرة للتوكن)
+        "packs": [
+            ("مسرّع الأحمر 100%", 1.65), ("Premium (Black)", 6.19), ("مسرّع الأزرق 150%", 7.74),
+            ("مسرّع الأسود 300%", 14.24), ("Premium Plus+ (Red)", 27.35),
+            ("توكنز 400,000 VIP", 46.45), ("توكنز 525,000 VIP", 60.38), ("توكنز 805,000 VIP", 90.83),
+        ],
+    },
+    "cod": {
+        "emoji": "🎯", "name": "كول أوف ديوتي (CoD)",
+        "ask": "أرسل رقم الزبون (واتساب):",
+        "packs": [
+            ("80 Points", 1.50), ("400+20 Points", 5.90), ("800+80 Points", 11.27),
+            ("2000+400 Points", 27.90), ("3750+1250 Points", 55.79),
+        ],
+    },
+    "fc": {
+        "emoji": "⚽", "name": "FC (Silver / Point)",
+        "ask": ("أرسل آيدي اللاعب + اسم السيرفر.\n"
+                "السيرفرات: الكويت، قطر، البحرين، مصر، المغرب، العراق، تركيا، سنغافورة، تايلاند، "
+                "إندونيسيا، كولومبيا، بيرو، تشيلي، الإكوادور، بوليفيا، باراغواي، نيجيريا، أستراليا، "
+                "نيوزيلندا، الهند، بنغلادش، باكستان، نيبال، الجزائر، غانا، كينيا، تونس، السعودية، "
+                "هونغ كونغ، جنوب أفريقيا، سريلانكا، الإمارات:"),
+        "packs": [
+            ("Silver 99", 1.23), ("Point 100", 1.23), ("Silver 499", 6.10), ("Point 520", 6.10),
+            ("Silver 999", 12.08), ("Point 1070", 12.08), ("Silver 1999", 24.17),
+            ("Point 2200", 24.17), ("Silver 4999", 60.42), ("Point 5750", 60.42),
+            ("Silver 9999", 120.84), ("Point 12000", 120.84),
+        ],
+    },
+    "efoot": {
+        "emoji": "🥅", "name": "إي فوتبول (eFootball)",
+        "ask": "أرسل رقم هاتف الزبون (واتساب):",
+        "packs": [
+            ("حزمة سواريز", 2.15), ("حزمة كاسياس", 4.29), ("300 كوينز", 5.90), ("550 كوينز", 6.97),
+            ("750 كوينز", 8.58), ("1040 كوينز", 10.73), ("2130 كوينز", 21.46),
+            ("3250 كوينز", 32.19), ("5700 كوينز", 53.11), ("12800 كوينز", 104.08),
+        ],
+    },
+    "pubgp": {
+        "emoji": "🎫", "name": "حزم الازدهار ببجي",
+        "ask": "أرسل آيدي اللاعب:",
+        "packs": [
+            ("برايم شهر", 0.92), ("حزمة الشراء الأول", 0.94), ("عروض أسبوعية (1)", 0.94),
+            ("حزمة ترقية الأسلحة", 2.77), ("برايم 3 أشهر", 2.77), ("عروض أسبوعية (2)", 2.78),
+            ("الشعار الأسطوري الأسبوعي", 2.78), ("حزمة الشعار الخرافي", 4.63),
+            ("برايم 6 أشهر", 5.55), ("Elite Pass (1-50)", 5.56), ("برايم بلاس شهر", 9.25),
+            ("برايم 12 شهر", 11.10), ("Elite Pass (1-100)", 11.30),
+            ("Elite Pass Plus (1-100)", 27.61), ("برايم بلاس 3 أشهر", 27.75),
+            ("برايم بلاس 6 أشهر", 55.49), ("برايم بلاس 12 شهر", 110.97),
+        ],
+    },
+    "sniper": {
+        "emoji": "🎯", "name": "Pure Sniper",
+        "ask": "أرسل آيدي اللاعب:",
+        "packs": [
+            ("900 Gold", 5.58), ("1900 Gold", 11.38), ("4300 Gold", 22.98),
+            ("11000 Gold", 58.01), ("24000 Gold", 113.82),
+        ],
+    },
+    "hok": {
+        "emoji": "🗡", "name": "Honor Of Kings",
+        "ask": "أرسل آيدي اللاعب فقط:",
+        "packs": [
+            ("400 Token", 5.47), ("800 Token", 10.94), ("2400 Token", 32.83),
+            ("4000 Token", 54.72), ("8000 Token", 109.45),
+        ],
+    },
+    "merge": {
+        "emoji": "🏰", "name": "Merge Kingdoms",
+        "ask": "أرسل آيدي اللاعب فقط:",
+        "packs": [
+            ("ألماس 1$", 1.17), ("ألماس 5$", 5.32), ("ألماس 30$", 29.77),
+            ("ألماس 50$", 48.91), ("ألماس 100$", 96.75),
+        ],
+    },
+    "lastwar": {
+        "emoji": "🪖", "name": "Last War",
+        "ask": "أرسل آيدي اللاعب + رقم للتواصل:",
+        "packs": [
+            ("منتج بقيمة 0.99", 1.56),
+            ("منتج بقيمة 3.99", 5.21),
+            ("منتج بقيمة 4.99", 6.25),
+            ("منتج بقيمة 9.99", 11.47),
+            ("WeeklyPass", 19.8),
+            ("Season Battle Pass", 19.8),
+            ("Dawn Fund", 19.8),
+            ("منتج بقيمة 19.99", 22.93),
+            ("Super Monthly Pass", 23.97),
+            ("Overlord Growth Handbook", 23.97),
+        ],
+    },
+    "pool8": {
+        "emoji": "🎱", "name": "8 Ball Pool",
+        "ask": "أرسل آيدي اللاعب:",
+        "packs": [
+            ("112000 Coins", 2.21),
+            ("110 Cash", 2.21),
+            ("256000 Coins", 4.42),
+            ("250 Cash", 4.42),
+            ("800000 Coins", 11.05),
+            ("800 Cash", 11.05),
+            ("2000 Cash", 22.11),
+            ("2000000 Coins", 22.11),
+        ],
+    },
+    "lords": {
+        "emoji": "🏯", "name": "Lords Mobile",
+        "ask": "أرسل آيدي اللاعب:",
+        "packs": [
+            ("195 ألماسة", 2.3),
+            ("بطاقة أسبوعية", 2.3),
+            ("395 ألماسة", 4.61),
+            ("785 ألماسة", 8.59),
+            ("1179 ألماسة", 14.67),
+            ("1964 ألماسة", 24.09),
+            ("3928 ألماسة", 48.19),
+            ("7857 ألماسة", 95.33),
+            ("11785 ألماسة", 142.47),
+            ("19642 ألماسة", 237.79),
+        ],
+    },
+    "whiteout": {
+        "emoji": "❄️", "name": "Whiteout Survival",
+        "ask": "أرسل آيدي اللاعب:",
+        "packs": [
+            ("99 ألماسة", 1.39),
+            ("299 ألماسة", 4.17),
+            ("499 ألماسة", 5.66),
+            ("999 ألماسة", 11.22),
+            ("1999 ألماسة", 22.76),
+            ("4999 ألماسة", 56.09),
+            ("9999 ألماسة", 112.18),
+        ],
+    },
+    "genshin": {
+        "emoji": "🌸", "name": "Genshin Impact",
+        "ask": "أرسل آيدي اللاعب + السيرفر (أمريكا / أوروبا / آسيا / تايوان-هونغ كونغ-ماكاو) + اسم الشخصية في اللعبة:",
+        "packs": [
+            ("60 صلة زمنية", 1.03),
+            ("بركة قمر الويلكين", 5.2),
+            ("300+30 كريستالة", 5.2),
+            ("980+110 كريستالة", 15.62),
+            ("980+110 كرونال نيكسوس", 15.62),
+            ("1980+260 كريستالة", 31.26),
+            ("1980+260 كرونال نيكسوس", 31.26),
+            ("3280+300 كريستالة", 52.11),
+            ("6480+1600 كريستالة", 104.22),
+            ("6480+1600 كرونال نيكسوس", 104.22),
+        ],
+    },
+    "mlbb": {
+        "emoji": "🛡", "name": "Mobile Legends",
+        "ask": "أرسل آيدي اللاعب + السيرفر:",
+        "packs": [
+            ("ألماس 253+25", 4.57),
+            ("ألماس 505+66", 9.14),
+            ("ألماس 1010+182", 18.29),
+            ("ألماس 1515+273", 27.43),
+            ("ألماس 2525+480", 45.72),
+            ("ألماس 3030+576", 54.86),
+            ("ألماس 4008+802", 73.15),
+            ("ألماس 5010+1002", 91.43),
+        ],
+    },
+    "delta": {
+        "emoji": "🔺", "name": "Delta Force Mobile",
+        "ask": "أرسل آيدي اللاعب:",
+        "packs": [
+            ("60+Bonus", 1.09),
+            ("300+Bonus", 4.93),
+            ("420+Bonus", 6.57),
+            ("680+Bonus", 8.65),
+            ("1280+Bonus", 18.61),
+            ("3280+Bonus", 47.06),
+            ("6480+Bonus", 91.93),
+            ("12960+Bonus", 207.95),
+            ("19440+Bonus", 300.97),
+        ],
+    },
+    "bloodstrike": {
+        "emoji": "🩸", "name": "Blood Strike",
+        "ask": "أرسل آيدي اللاعب:",
+        "packs": [
+            ("100+5 Gold", 0.93),
+            ("300+20 Gold", 2.87),
+            ("Strike Pass Elite", 3.52),
+            ("500+40 Gold", 4.39),
+            ("Strike Pass Premium", 7.95),
+            ("1000+100 Gold", 8.79),
+            ("2000+260 Gold", 17.6),
+            ("5000+800 Gold", 44.09),
+        ],
+    },
+    "arena": {
+        "emoji": "🎒", "name": "Arena Breakout",
+        "ask": "أرسل آيدي اللاعب:",
+        "packs": [
+            ("60+6 Bonds", 0.87),
+            ("310+25 Bonds", 4.4),
+            ("630+45 Bonds", 8.8),
+            ("1580+110 Bonds", 22.0),
+            ("3200+200 Bonds", 44.08),
+            ("6500+320 Bonds", 88.01),
+        ],
+    },
+    "pubgvn": {
+        "emoji": "🇻🇳", "name": "ببجي فيتنام (PUBG VN)",
+        "ask": "أرسل آيدي اللاعب:",
+        "packs": [
+            ("56 UC+Bonus", 1.38),
+            ("140 UC+Bonus", 2.64),
+            ("280 UC+Bonus", 5.16),
+            ("560 UC+Bonus", 10.43),
+            ("1400 UC+Bonus", 25.22),
+            ("2800 UC+Bonus", 50.45),
+        ],
+    },
+    "ludo": {
+        "emoji": "🎲", "name": "يلا لودو (Yalla Ludo)",
+        "ask": "أرسل آيدي اللاعب:",
+        "packs": [
+            ("2230 ألماس", 4.99),
+            ("5150 ألماس", 9.97),
+            ("27640 ألماس", 49.15),
+            ("55800 ألماس", 99.16),
+        ],
+    },
+    "tarbee3a": {
+        "emoji": "🀄", "name": "تربيعة",
+        "ask": "أرسل آيدي اللاعب:",
+        "packs": [
+            ("32,800 TopUp", 1.41),
+            ("94,300 TopUp", 3.96),
+            ("215,800 TopUp", 7.92),
+            ("406,800 TopUp", 13.76),
+            ("1,080,000 TopUp", 31.48),
+            ("2,376,000 TopUp", 63.06),
+            ("5,427,000 TopUp", 131.33),
+        ],
+    },
+}
+GAMES_PER_PAGE = 8
+PACKS_PER_PAGE = 8
+
+# ---------------------------------------------------------------------
+# كتالوج الحسابات الجاهزة — أسعار الجملة بالدولار.
+# سعر البيع = الجملة × سعر الدولار × (1 + نسبة ربح الحسابات) — تُضبط من /admin
+# صيغة الفئة: ("الاسم", السعر_بالدولار) — و"notes" تظهر للزبون قبل الشراء.
+# ---------------------------------------------------------------------
+ACCOUNTS_CATALOG = {
+    "chatgpt": {
+        "emoji": "🤖", "name": "ChatGPT",
+        "ask": "أرسل الإيميل (البريد الإلكتروني الذي تريد التفعيل عليه):",
+        "packs": [("ChatGPT شهر مع ضمان", 6.13), ("ChatGPT Go شهر مع ضمان", 9.20), ("ChatGPT Plus شهر مع ضمان", 21.46)],
+    },
+    "netflix": {
+        "emoji": "🎬", "name": "Netflix",
+        "ask": "أرسل رقم للتواصل:",
+        "packs": [("شهر - جهاز واحد", 4.09), ("سنة - جهاز واحد", 22.48)],
+        "notes": ("• يتطلب التفعيل الاتصال بـ ExpressVPN على سيرفر مصر (Egypt) حصراً لإتمام الدخول.\n"
+                  "• لشاشات LG وSamsung لا يدعم التطبيق الـ VPN مباشرة، ويلزم تشغيله عبر TV Box أو توصيل لابتوب "
+                  "عبر HDMI أو بث المحتوى (Cast) من الهاتف."),
+    },
+    "iptv": {
+        "emoji": "📺", "name": "IPTV",
+        "ask": "أرسل رقم للتواصل:",
+        "packs": [("اشتراك شهر", 2.04), ("اشتراك 3 شهور", 4.09), ("اشتراك سنة", 10.22)],
+        "notes": ("• العملية يدوية وتستغرق بعض الوقت لتنفيذها.\n"
+                  "• تحميل التطبيق عبر الرابط: aftv.news/5258786\n"
+                  "• إدخال بيانات الاشتراك الخاصة بك والاستمتاع بالمشاهدة مباشرة."),
+    },
+    "shahid": {
+        "emoji": "🎞", "name": "Shahid VIP",
+        "ask": "أرسل رقم الموبايل:",
+        "packs": [("شهر - شخصي غير مشترك (شاشة + موبايل)", 4.09), ("3 شهور - شخصي غير مشترك (شاشة + موبايل)", 8.18)],
+    },
+    "appleid": {
+        "emoji": "🍎", "name": "Apple ID",
+        "ask": "أرسل رقم الموبايل:",
+        "packs": [("حساب متجر App Store", 1.12)],
+        "notes": ("• العملية آلية وتعمل على مدار اليوم.\n"
+                  "• يُستعمل الحساب فقط كـ Apple ID لتنزيل التطبيقات من App Store.\n"
+                  "• لا يُستعمل نهائياً كحساب iCloud، والجهة غير مسؤولة عن استعماله كـ iCloud."),
+    },
+    "capcut": {
+        "emoji": "✂️", "name": "CapCut Pro",
+        "ask": "أرسل رقم التواصل:",
+        "packs": [("شهر", 3.07), ("6 شهور", 11.24), ("سنة", 33.72)],
+    },
+    "anghami": {
+        "emoji": "🎵", "name": "Anghami Plus",
+        "ask": "أرسل رقم التواصل:",
+        "packs": [("شهر", 3.58), ("6 أشهر", 12.26), ("سنة", 19.42)],
+    },
+    "canva": {
+        "emoji": "🎨", "name": "Canva Pro",
+        "ask": "أرسل الإيميل الذي تريد التفعيل عليه:",
+        "packs": [("سنة", 2.0)],
+    },
+    "picsart": {
+        "emoji": "🖼", "name": "Picsart",
+        "ask": "أرسل رقم للتواصل:",
+        "packs": [("حساب شخصي لمدة سنة", 15.33)],
+    },
+    "adobe": {
+        "emoji": "🅰️", "name": "Adobe",
+        "ask": "أرسل رقم للتواصل:",
+        "packs": [("اشتراك سنة", 124.67)],
+    },
+    "gemini": {
+        "emoji": "✨", "name": "Gemini Pro",
+        "ask": "أرسل الإيميل الذي تريد التفعيل عليه:",
+        "packs": [("سنة", 1.53)],
+    },
+    "perplexity": {
+        "emoji": "🔎", "name": "Perplexity Pro",
+        "ask": "أرسل رقم للتواصل:",
+        "packs": [("اشتراك سنة", 42.92)],
+    },
+    "supergrok": {
+        "emoji": "🧠", "name": "SuperGrok",
+        "ask": "أرسل رقم للتواصل:",
+        "packs": [("تفعيل 3 شهور", 36.79)],
+    },
+    "antigravity": {
+        "emoji": "🚀", "name": "Google Antigravity",
+        "ask": "أرسل رقم للتواصل:",
+        "packs": [("تفعيل سنة", 35.77)],
+    },
+    "gmail": {
+        "emoji": "📧", "name": "حساب Gmail",
+        "ask": "أرسل رقم للتواصل:",
+        "packs": [("حساب Gmail جديد", 1.02)],
+    },
+    "duolingo": {
+        "emoji": "🦉", "name": "Duolingo",
+        "ask": "أرسل رقم للتواصل:",
+        "packs": [("سنة Super Duolingo", 1.02)],
+    },
+    "cursor": {
+        "emoji": "⌨️", "name": "Cursor",
+        "ask": "أرسل رقم للتواصل:",
+        "packs": [("Cursor Pro - شهر", 19.42), ("Cursor Pro Plus - شهر", 61.31)],
+    },
+    "prime": {
+        "emoji": "📦", "name": "Amazon Prime",
+        "ask": "أرسل رقم للتواصل:",
+        "packs": [("6 أشهر", 4.09)],
+    },
+    "eleven": {
+        "emoji": "🎙", "name": "ElevenLabs Creator",
+        "ask": "أرسل رقم للتواصل:",
+        "packs": [("شهر", 9.20)],
+    },
+    "runway": {
+        "emoji": "🎥", "name": "Runway Pro",
+        "ask": "أرسل رقم للتواصل:",
+        "packs": [("12 شهر", 34.74)],
+    },
+    "heygen": {
+        "emoji": "🧑‍💼", "name": "Heygen Pro",
+        "ask": "أرسل البريد الإلكتروني المسجل على Heygen + كلمة المرور (في رسالة واحدة):",
+        "packs": [("خدمة Heygen Pro على الإيميل الشخصي", 17.37)],
+    },
+    "expressvpn": {
+        "emoji": "🔐", "name": "ExpressVPN",
+        "ask": "أرسل رقم تواصل:",
+        "packs": [("شهر - كمبيوتر", 1.02), ("شهر - موبايل", 1.02), ("3 أشهر", 4.09), ("6 أشهر", 6.13), ("سنة", 12.26)],
+    },
+}
+ACCOUNTS_PER_PAGE = 8
+
+# ---------------------------------------------------------------------
+# كتالوج السوشيال ميديا — أسعار الجملة بالدولار.
+# سعر البيع = الجملة × سعر الدولار × (1 + نسبة ربح السوشيال) — تُضبط من /admin
+# ---------------------------------------------------------------------
+SOCIAL_PLATFORMS = {
+    "fb": ("📘", "فيسبوك"),
+    "ig": ("📸", "إنستغرام"),
+    "tg": ("✈️", "تلغرام"),
+}
+SOCIAL_SERVICES = {
+    "fb_ads": {"plat": "fb", "name": "إعلانات ممولة", "ask": "أرسل رقم هاتفك للتواصل وتجهيز الإعلان:",
+        "packs": [
+            ("لمدة يوم", 3.07),
+            ("لمدة يومين", 6.13),
+            ("لمدة 3 أيام", 9.2),
+            ("لمدة 4 أيام", 12.26),
+            ("لمدة 5 أيام", 15.33),
+            ("لمدة 6 أيام", 18.39),
+            ("لمدة 7 أيام", 21.46),
+            ("لمدة 10 أيام", 30.66),
+        ]},
+    "fb_views": {"plat": "fb", "name": "مشاهدات فيديو / ريلز", "ask": "أرسل رابط الفيديو:",
+        "packs": [
+            ("5,000 مشاهدة", 1.53),
+            ("10,000 مشاهدة", 2.04),
+            ("50,000 مشاهدة", 10.22),
+            ("100,000 مشاهدة", 20.44),
+        ]},
+    "fb_story": {"plat": "fb", "name": "تفاعل (ريأكشن) ستوري", "ask": "أرسل رابط الستوري:",
+        "packs": [
+            ("1,000 تفاعل", 0.61),
+            ("5,000 تفاعل", 3.07),
+            ("10,000 تفاعل", 6.13),
+            ("50,000 تفاعل", 30.66),
+        ]},
+    "fb_likes": {"plat": "fb", "name": "لايكات منشور", "ask": "أرسل رابط المنشور:",
+        "packs": [
+            ("5,000 لايك", 4.09),
+            ("10,000 لايك", 7.66),
+            ("50,000 لايك", 36.79),
+        ]},
+    "fb_followers": {"plat": "fb", "name": "متابعين صفحات / حسابات", "ask": "أرسل رابط الصفحة:",
+        "packs": [
+            ("1,000 متابع", 0.72),
+            ("5,000 متابع", 3.58),
+            ("10,000 متابع", 7.15),
+            ("50,000 متابع", 35.77),
+        ]},
+    "fb_comments": {"plat": "fb", "name": "تعليقات عربية عشوائية", "ask": "أرسل رابط المنشور:",
+        "packs": [
+            ("200 تعليق", 1.23),
+            ("500 تعليق", 3.07),
+            ("1,000 تعليق", 6.13),
+            ("5,000 تعليق", 30.66),
+        ]},
+    "ig_views": {"plat": "ig", "name": "مشاهدات فيديو", "ask": "أرسل رابط الفيديو:",
+        "packs": [
+            ("500 ألف مشاهدة", 1.53),
+            ("مليون مشاهدة", 3.07),
+            ("5 ملايين مشاهدة", 10.22),
+            ("10 ملايين مشاهدة", 20.44),
+        ]},
+    "ig_likes": {"plat": "ig", "name": "لايكات منشور", "ask": "أرسل رابط المنشور:",
+        "packs": [
+            ("5,000 لايك", 3.83),
+            ("10,000 لايك", 7.66),
+            ("50,000 لايك", 38.32),
+        ]},
+    "ig_comments": {"plat": "ig", "name": "تعليقات عربية عشوائية", "ask": "أرسل رابط المنشور:",
+        "packs": [
+            ("1,000 تعليق عربي عشوائي", 10.22),
+        ]},
+    "ig_followers": {"plat": "ig", "name": "متابعين", "ask": "أرسل رابط الصفحة:",
+        "packs": [
+            ("1,000 متابع (حسابات أجنبية)", 4.09),
+            ("1,000 متابع (حسابات عربية)", 11.24),
+            ("5,000 متابع", 15.33),
+            ("10,000 متابع", 30.66),
+        ]},
+    "tg_members_f": {"plat": "tg", "name": "أعضاء قنوات وكروبات (حسابات أجنبية)", "ask": "أرسل رابط القناة:",
+        "packs": [
+            ("5,000 عضو", 2.55),
+            ("10,000 عضو", 5.11),
+            ("20,000 عضو", 10.22),
+        ]},
+    "tg_members_a": {"plat": "tg", "name": "أعضاء قنوات وكروبات (حسابات عربية)", "ask": "أرسل رابط القناة:",
+        "packs": [
+            ("1,000 عضو", 2.04),
+            ("5,000 عضو", 10.22),
+        ]},
+    "tg_react": {"plat": "tg", "name": "تفاعل منشور", "ask": "أرسل رابط المنشور:",
+        "packs": [
+            ("1,000 تفاعل", 0.51),
+            ("5,000 تفاعل", 2.55),
+            ("10,000 تفاعل", 5.11),
+        ]},
+    "tg_views": {"plat": "tg", "name": "مشاهدات منشور", "ask": "أرسل رابط المنشور:",
+        "packs": [
+            ("5,000 مشاهدة", 1.02),
+            ("50,000 مشاهدة", 10.22),
+        ]},
+    "tg_story": {"plat": "tg", "name": "رياكشن ستوري", "ask": "أرسل رابط الستوري:",
+        "packs": [
+            ("5,000 رياكشن", 1.02),
+            ("10,000 رياكشن", 2.04),
+        ]},
+}
+# ---------------------------------------------------------------------
+# كتالوج أرقام التفعيل — أسعار الجملة بالدولار.
+# سعر البيع = الجملة × سعر الدولار × (1 + نسبة ربح الأرقام) — تُضبط من /admin
+# ---------------------------------------------------------------------
+NUMBERS_CATALOG = {
+    "wa": {"emoji": "🟢", "name": "رقم تفعيل واتساب", "ask": "أرسل رقم التواصل:", "usd": 3.00},
+    "tg": {"emoji": "🔵", "name": "رقم تيلغرام أمريكي", "ask": "أرسل رقم التواصل:", "usd": 3.00},
+    "apple": {"emoji": "🍎", "name": "رقم لإنشاء حساب آبل أمريكي", "ask": "أرسل رقم التواصل:", "usd": 3.00},
+    "tiktok": {"emoji": "🎵", "name": "رقم تفعيل TikTok", "ask": "أرسل رقم التواصل:", "usd": 3.00},
 }
 
-FAST_ACCOUNTS = {
-    "1": ("ChatGPT عادي (شهر)", 1700),
-    "2": ("ChatGPT Go (ضمان)", 2000),
-    "3": ("ChatGPT Plus شهر", 3500),
-    "4": ("Netflix شهر جهاز واحد", 800),
-    "5": ("Netflix سنة جهاز واحد", 5000),
-}
-
-ACCOUNTS_LIST = [
-    "Shahid VIP", "Watch It", "OSN+", "TOD TV", "Disney+", "Amazon Prime Video",
-    "Apple TV+", "IPTV سنة", "IPTV 6 أشهر", "Spotify Premium", "YouTube Premium",
-    "Anghami Plus", "SoundCloud Pro", "Deezer Premium", "Canva Pro سنة",
-    "Canva Pro شهر", "Adobe Cloud", "TradingView Pro", "Duolingo Plus",
-    "LinkedIn Premium", "Telegram Premium", "NordVPN", "ExpressVPN", "Surfshark VPN",
-    "Crunchyroll Fan", "Mega Cloud", "Google One",
-]
-
-SOCIAL_PACKS = {
-    "fb_view": ("مشاهدات 10k", 500, "fb"),
-    "fb_like": ("لايكات منشور 5k", 700, "fb"),
-    "fb_sub": ("متابعين 1k", 150, "fb"),
-    "fb_comm": ("تعليقات عربية 200", 250, "fb"),
-    "ig_view": ("مشاهدات 500k", 300, "ig"),
-    "ig_like": ("لايكات 5k", 700, "ig"),
-    "ig_sub_f": ("متابعين أجنبي 1k", 700, "ig"),
-    "ig_sub_a": ("متابعين عربي 1k", 1350, "ig"),
-    "tg_sub": ("أعضاء قنوات 1k", 400, "tg"),
-    "tg_react": ("تفاعلات 1k", 150, "tg"),
-    "tg_view": ("مشاهدات 5k", 200, "tg"),
-}
-
-AD_PACKS = {1: 600, 2: 1100, 3: 1500, 4: 2000, 5: 2500, 6: 3000, 7: 3600, 10: 5000}
-AD_DAY_PRICE = 200
-ACCOUNTS_PER_PAGE = 6
 MIN_TOPUP = 1000
 
 
@@ -242,8 +775,9 @@ async def init_db():
         await db.execute("CREATE INDEX IF NOT EXISTS idx_orders_user_status ON orders(user_id, status, created_at);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_ledger_user ON wallet_ledger(user_id);")
+        await db.execute("CREATE TABLE IF NOT EXISTS bot_config (key TEXT PRIMARY KEY, value TEXT);")
 
-        for k, v in (("dollar_rate", 150.0), ("num_whatsapp", 400.0), ("num_telegram", 300.0)):
+        for k, v in (("dollar_rate", DEFAULT_DOLLAR_RATE), ("num_whatsapp", 400.0), ("num_telegram", 300.0), ("margin_games", DEFAULT_MARGIN), ("margin_chat", DEFAULT_MARGIN), ("margin_accounts", DEFAULT_MARGIN), ("margin_social", DEFAULT_MARGIN), ("margin_numbers", DEFAULT_MARGIN)):
             await db.execute("INSERT OR IGNORE INTO settings (key, val) VALUES (?, ?);", (k, v))
         await db.execute(
             "INSERT INTO users (user_id, username, full_name, role) VALUES (?, 'Admin', 'Admin', 'ADMIN') "
@@ -265,6 +799,34 @@ async def update_setting(key: str, val: float):
             "INSERT INTO settings (key, val) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET val=excluded.val",
             (key, val),
         )
+
+
+ENV_CONFIG = {"force_channel": os.getenv("FORCE_CHANNEL", "").strip(), "force_link": os.getenv("FORCE_LINK", "").strip()}
+
+
+async def get_config(key: str, default: str = "") -> str:
+    """إعدادات نصية. القيمة المحفوظة من لوحة المدير أولى، ثم متغير البيئة."""
+    async with get_db() as db:
+        cur = await db.execute("SELECT value FROM bot_config WHERE key=?", (key,))
+        row = await cur.fetchone()
+    if row and row[0] not in (None, ""):
+        return row[0]
+    return ENV_CONFIG.get(key) or default
+
+
+async def set_config(key: str, value: str):
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO bot_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+
+
+async def force_channel_ref():
+    ch = await get_config("force_channel")
+    if ch in ("", "off"):
+        return None
+    return int(ch) if ch.lstrip("-").isdigit() else ch
 
 
 # =====================================================================
@@ -474,6 +1036,30 @@ class WalletService:
             return row[0] if cur.rowcount else None
 
     @staticmethod
+    async def admin_debit(user_id: int, amount: int, ref_id: str, note: str = "") -> Optional[int]:
+        """سحب رصيد إداري ذري. يرجع الرصيد الجديد أو None إن لم يكفِ الرصيد/المستخدم غير موجود."""
+        if amount <= 0:
+            return None
+        try:
+            async with write_tx() as db:
+                cur = await db.execute(
+                    "UPDATE users SET balance = balance - ? WHERE user_id = ? AND balance >= ?", (amount, user_id, amount)
+                )
+                if cur.rowcount == 0:
+                    return None
+                cur = await db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+                nb = (await cur.fetchone())[0]
+                await db.execute(
+                    "INSERT INTO wallet_ledger (user_id, reference_id, type, amount, balance_after, note) "
+                    "VALUES (?, ?, 'ADMIN_DEBIT', ?, ?, ?)",
+                    (user_id, ref_id, -amount, nb, note),
+                )
+                return nb
+        except Exception as e:
+            log.error("admin_debit error: %s", e)
+            return None
+
+    @staticmethod
     async def last_pending_order(user_id: int):
         async with get_db() as db:
             cur = await db.execute(
@@ -533,6 +1119,10 @@ class AdminActions(StatesGroup):
     add_bal_user = State()
     add_bal_amount = State()
     set_dollar_rate = State()
+    set_margin = State()
+    find_user = State()
+    msg_user = State()
+    set_channel = State()
     broadcast_msg = State()
 
 
@@ -540,8 +1130,14 @@ class ChatInput(StatesGroup):
     entering_data = State()
 
 
-class CustomAd(StatesGroup):
-    days = State()
+class GameTokens(StatesGroup):
+    entering = State()
+
+
+class ChatSearch(StatesGroup):
+    query = State()
+
+
 
 
 # =====================================================================
@@ -699,6 +1295,91 @@ class UserGuardMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+_sub_cache: Dict[int, float] = {}
+_sub_warn_at = 0.0
+
+
+async def check_subscription(user_id: int) -> bool:
+    global _sub_warn_at
+    ref = await force_channel_ref()
+    if not ref:
+        return True
+    now = time.monotonic()
+    if _sub_cache.get(user_id, 0) > now:
+        return True
+    try:
+        m = await bot.get_chat_member(ref, user_id)
+        ok = m.status in ("member", "administrator", "creator") or (m.status == "restricted" and getattr(m, "is_member", False))
+    except Exception as e:
+        # لا نقفل البوت على الجميع إذا تعذر الفحص (مثلاً البوت ليس مشرفاً في القناة)
+        log.error("subscription check failed: %s", e)
+        if now - _sub_warn_at > 600:
+            _sub_warn_at = now
+            try:
+                await bot.send_message(ADMIN_ID, "⚠️ تعذر فحص الاشتراك الإجباري. تأكد أن البوت <b>مشرف</b> في القناة وأن المعرف صحيح. "
+                                                 "تم السماح للمستخدمين مؤقتاً.")
+            except Exception:
+                pass
+        return True
+    if ok:
+        _sub_cache[user_id] = now + 120
+    return ok
+
+
+async def send_sub_prompt(event):
+    link = await get_config("force_link")
+    if not link:
+        ref = await force_channel_ref()
+        if isinstance(ref, str) and ref.startswith("@"):
+            link = f"https://t.me/{ref[1:]}"
+        elif isinstance(ref, int):
+            # قناة خاصة بلا رابط محدد: ننشئ رابط دعوة تلقائياً (يتطلب أن يكون البوت مشرفاً بصلاحية الدعوة)
+            try:
+                link = await bot.export_chat_invite_link(ref)
+                await set_config("force_link", link)
+            except Exception as e:
+                log.warning("could not create invite link: %s", e)
+    rows = []
+    if link:
+        rows.append([InlineKeyboardButton(text="📣 الاشتراك في القناة", url=link)])
+    rows.append([B("✅ تحققت من الاشتراك", "chk_sub")])
+    text = ("📣 <b>للاستفادة من البوت يجب الاشتراك في قناتنا أولاً.</b>\n\n"
+            "اشترك في القناة ثم اضغط «✅ تحققت من الاشتراك».")
+    try:
+        if isinstance(event, types.CallbackQuery):
+            await event.answer("⚠️ اشترك في القناة أولاً.", show_alert=True)
+            await bot.send_message(event.from_user.id, text, reply_markup=KB(rows))
+        else:
+            await event.answer(text, reply_markup=KB(rows))
+    except Exception as e:
+        log.warning("send_sub_prompt failed: %s", e)
+
+
+class AccessGateMiddleware(BaseMiddleware):
+    """وضع الصيانة + الاشتراك الإجباري في المحادثات الخاصة (المدير مستثنى)."""
+
+    async def __call__(self, handler, event, data):
+        user = data.get("event_from_user")
+        chat = data.get("event_chat")
+        if not user or user.is_bot or not chat or chat.type != "private" or user.id == ADMIN_ID:
+            return await handler(event, data)
+        if await get_config("maintenance") == "1":
+            try:
+                if isinstance(event, types.CallbackQuery):
+                    await event.answer("🛠 البوت في وضع الصيانة حالياً، سنعود قريباً.", show_alert=True)
+                else:
+                    await event.answer("🛠 البوت في وضع الصيانة حالياً، سنعود قريباً.")
+            except Exception:
+                pass
+            return None
+        if isinstance(event, types.CallbackQuery) and event.data == "chk_sub":
+            return await handler(event, data)
+        if not await check_subscription(user.id):
+            await send_sub_prompt(event)
+            return None
+        return await handler(event, data)
+
+
 class AutoAnswerMiddleware(BaseMiddleware):
     """يوقف مؤشر التحميل على الأزرار بعد كل معالج."""
 
@@ -714,6 +1395,8 @@ class AutoAnswerMiddleware(BaseMiddleware):
 
 dp.message.outer_middleware(UserGuardMiddleware())
 dp.callback_query.outer_middleware(UserGuardMiddleware())
+dp.message.outer_middleware(AccessGateMiddleware())
+dp.callback_query.outer_middleware(AccessGateMiddleware())
 dp.callback_query.middleware(AutoAnswerMiddleware())
 
 
@@ -753,16 +1436,50 @@ async def back_to_home_cb(cb: types.CallbackQuery, state: FSMContext):
     await safe_edit(cb, format_home_text(u), main_dashboard_kb())
 
 
-def admin_kb():
+@dp.callback_query(F.data == "chk_sub")
+async def chk_sub_cb(cb: types.CallbackQuery, state: FSMContext):
+    _sub_cache.pop(cb.from_user.id, None)
+    if await check_subscription(cb.from_user.id):
+        await state.clear()
+        u = await WalletService.get_or_create_user(cb.from_user.id)
+        await safe_edit(cb, format_home_text(u), main_dashboard_kb())
+    else:
+        await cb.answer("⚠️ لم نجد اشتراكك بعد. اشترك في القناة ثم اضغط تحقق.", show_alert=True)
+
+
+async def admin_counts() -> Tuple[int, int]:
+    async with get_db() as db:
+        o = (await (await db.execute("SELECT COUNT(*) FROM orders WHERE status='PROCESSING'")).fetchone())[0]
+        p = (await (await db.execute("SELECT COUNT(*) FROM payments WHERE status='UNDER_REVIEW'")).fetchone())[0]
+    return o, p
+
+
+async def admin_kb():
+    o, p = await admin_counts()
     return KB([
-        [B("📊 إحصائيات النظام", "adm:stats")],
-        [B("💵 تغذية رصيد مستخدم", "adm:add_bal"), B("💱 سعر صرف الدولار", "adm:set_rate")],
+        [B("📊 الإحصائيات", "adm:stats")],
+        [B(f"📋 الطلبات المعلقة ({o})", "adm:pend"), B(f"💳 الإيداعات المعلقة ({p})", "adm:payp")],
+        [B("👤 إدارة مستخدم", "adm:user")],
+        [B("➕ تغذية رصيد", "adm:add_bal"), B("➖ سحب رصيد", "adm:sub_bal")],
+        [B("💱 سعر الدولار", "adm:set_rate"), B("📈 نسب الربح", "adm:margin")],
+        [B("📣 الاشتراك الإجباري", "adm:fsub"), B("🛠 وضع الصيانة", "adm:maint")],
         [B("📢 إذاعة جماعية", "adm:broadcast")],
         [B("❌ إغلاق اللوحة", "adm:close")],
     ])
 
 
-ADMIN_TITLE = "⚙️ <b>لوحة التحكم الرئيسية للمدير (V2 Wallet-Core):</b>"
+async def admin_title() -> str:
+    maint = await get_config("maintenance") == "1"
+    ref = await force_channel_ref()
+    title = await get_config("force_title")
+    rate = await get_setting("dollar_rate")
+    return (
+        "⚙️ <b>لوحة تحكم المدير</b>\n"
+        "────────────────────────────\n"
+        f"💱 سعر الدولار: <b>{rate:,.2f} ل.س</b>\n"
+        f"🛠 وضع الصيانة: {'🔴 مفعّل' if maint else '🟢 متوقف'}\n"
+        f"📣 الاشتراك الإجباري: {('🟢 ' + esc(str(title or ref))) if ref else '⚪ متوقف'}"
+    )
 
 
 @dp.message(Command("admin"), F.chat.type == "private")
@@ -771,7 +1488,7 @@ async def admin_panel_start(message: types.Message, state: FSMContext):
         await message.reply("⛔ هذا الأمر مخصص للمدير العام فقط!")
         return
     await state.clear()
-    await message.answer(ADMIN_TITLE, reply_markup=admin_kb())
+    await message.answer(await admin_title(), reply_markup=await admin_kb())
 
 
 @dp.message(Command("pending"), F.chat.type == "private")
@@ -1245,40 +1962,132 @@ async def proc_mtn_cash_num(message: types.Message, state: FSMContext):
 # =====================================================================
 # 13. شحن الألعاب
 # =====================================================================
+MARGIN_SECTIONS = {"games": "الألعاب", "chat": "تطبيقات الشات", "accounts": "الحسابات الجاهزة", "social": "السوشيال ميديا", "numbers": "أرقام التفعيل"}  # أقسام أخرى تُضاف هنا لاحقاً
+
+
+async def sell_price(cost_usd: Optional[float] = None, cost_syp: Optional[float] = None, section: str = "games") -> int:
+    """سعر البيع = الجملة × (1 + نسبة الربح)، مع تقريب لأعلى. الدولار يُحوَّل بسعر الصرف الحالي."""
+    margin = await get_setting(f"margin_{section}")
+    cost = cost_usd * await get_setting("dollar_rate") if cost_usd is not None else float(cost_syp or 0)
+    return max(1, math.ceil(round(cost * (1 + margin / 100), 6)))
+
+
+async def show_games_list(cb: types.CallbackQuery, page: int):
+    keys = list(GAMES_CATALOG.keys())
+    total = max(1, (len(keys) + GAMES_PER_PAGE - 1) // GAMES_PER_PAGE)
+    page = min(max(page, 0), total - 1)
+    chunk = keys[page * GAMES_PER_PAGE:(page + 1) * GAMES_PER_PAGE]
+    rows = [[B(f"{GAMES_CATALOG[k]['emoji']} {GAMES_CATALOG[k]['name']}", f"gm:{k}:0")] for k in chunk]
+    nav = []
+    if page > 0:
+        nav.append(B("⬅️ السابق", f"gl:{page - 1}"))
+    if page < total - 1:
+        nav.append(B("التالي ➡️", f"gl:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([B("🎮 باقي الألعاب [طلب تسعير]", "quote:game")])
+    rows.append([B("🔙 العودة للرئيسية", "back_home")])
+    await safe_edit(cb, f"🎮 <b>اختر اللعبة المطلوبة</b> (صفحة {page + 1} من {total}):", KB(rows))
+
+
 @dp.callback_query(F.data == "sec:games")
 async def games_home(cb: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await safe_edit(cb, "🎮 <b>اختر اللعبة المطلوبة:</b>", KB([
-        [B("🔫 ببجي (PUBG)", "game:pubg")],
-        [B("🔥 فري فاير (Free Fire)", "game:ff")],
-        [B("🃏 جواكر (Jawaker)", "game:jawaker")],
-        [B("⚔️ كلاش أوف كلانس (CoC)", "game:coc")],
-        [B("🎮 باقي الألعاب [طلب تسعير]", "quote:game")],
-        [B("🔙 العودة للرئيسية", "back_home")],
-    ]))
+    await show_games_list(cb, 0)
 
 
-@dp.callback_query(F.data.startswith("game:"))
+@dp.callback_query(F.data.startswith("gl:"))
+async def games_page(cb: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await show_games_list(cb, int(cb.data.split(":")[1]))
+
+
+@dp.callback_query(F.data.startswith("gm:"))
 async def game_packs_view(cb: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    g_key = cb.data.split(":")[1]
-    rate = await get_setting("dollar_rate")
-    rows = [[B(f"{n} ⬅ {round(usd * rate):,} ل.س", f"buyg:{g_key}:{i}")] for i, (n, usd) in enumerate(GAME_PACKS[g_key])]
+    _, g_key, page_s = cb.data.split(":")
+    game = GAMES_CATALOG[g_key]
+    packs = game["packs"]
+    total = max(1, (len(packs) + PACKS_PER_PAGE - 1) // PACKS_PER_PAGE)
+    page = min(max(int(page_s), 0), total - 1)
+    start = page * PACKS_PER_PAGE
+    rows = []
+    if page == 0 and game.get("tokens"):
+        rows.append([B("🪙 شحن توكنز بالكمية", f"gtok:{g_key}")])
+    for i in range(start, min(start + PACKS_PER_PAGE, len(packs))):
+        label, usd = packs[i]
+        price = await sell_price(cost_usd=usd)
+        rows.append([B(f"{label} ⬅ {price:,} ل.س", f"gb:{g_key}:{i}")])
+    nav = []
+    if page > 0:
+        nav.append(B("⬅️ السابق", f"gm:{g_key}:{page - 1}"))
+    if page < total - 1:
+        nav.append(B("التالي ➡️", f"gm:{g_key}:{page + 1}"))
+    if nav:
+        rows.append(nav)
     rows.append([B("🔙 رجوع للألعاب", "sec:games")])
-    await safe_edit(cb, "🎮 <b>اختر الباقة المطلوبة:</b>", KB(rows))
+    await safe_edit(cb, f"{game['emoji']} <b>{esc(game['name'])}</b>\nاختر الباقة (صفحة {page + 1} من {total}):", KB(rows))
 
 
-@dp.callback_query(F.data.startswith("buyg:"))
+@dp.callback_query(F.data.startswith("gb:"))
 async def buy_game_pack(cb: types.CallbackQuery, state: FSMContext):
     _, g_key, idx = cb.data.split(":")
-    p_name, p_usd = GAME_PACKS[g_key][int(idx)]
-    price = round(p_usd * await get_setting("dollar_rate"))
-    await state.update_data(g_dept="games", g_service=f"شحن {g_key.upper()} ({p_name})", g_price=price)
+    game = GAMES_CATALOG[g_key]
+    label, usd = game["packs"][int(idx)]
+    price = await sell_price(cost_usd=usd)  # السعر دائماً من الخادم
+    await state.clear()
+    await state.update_data(g_dept="games", g_service=f"{game['name']} - {label}", g_price=price)
     await state.set_state(GlobalOrderState.input_data)
     await safe_edit(
         cb,
-        f"🎮 لقد اخترت: <b>{g_key.upper()} - {esc(p_name)}</b> ({price:,} ل.س)\n\nأدخل الآيدي (Player ID) واسمك داخل اللعبة:",
-        cancel_kb(f"game:{g_key}"),
+        f"{game['emoji']} لقد اخترت: <b>{esc(game['name'])} - {esc(label)}</b> ({price:,} ل.س)\n\n{esc(game['ask'])}",
+        cancel_kb(f"gm:{g_key}:0"),
+    )
+
+
+@dp.callback_query(F.data.startswith("gtok:"))
+async def game_tokens_start(cb: types.CallbackQuery, state: FSMContext):
+    g_key = cb.data.split(":")[1]
+    game = GAMES_CATALOG[g_key]
+    tk = game["tokens"]
+    await state.clear()
+    await state.update_data(tok_game=g_key)
+    await state.set_state(GameTokens.entering)
+    unit = await sell_price(cost_syp=tk["unit_syp"] * 1000) / 1000
+    await safe_edit(
+        cb,
+        f"🪙 <b>شحن توكنز {esc(game['name'])}</b>\n"
+        f"الحد الأدنى: <b>{tk['min']:,}</b> توكن\n"
+        f"السعر التقريبي: <b>{unit:.3f} ل.س</b> للتوكن\n\n"
+        f"أرسل الآيدي ثم الكمية وبينهما مسافة:\nمثال: <code>123456 10000</code>",
+        cancel_kb(f"gm:{g_key}:0"),
+    )
+
+
+@dp.message(GameTokens.entering)
+async def game_tokens_receive(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    game = GAMES_CATALOG.get(data.get("tok_game", ""))
+    if not game or not game.get("tokens"):
+        await state.clear()
+        await message.answer("⚠️ انتهت الجلسة، يرجى الاختيار من جديد.", reply_markup=HOME_KB)
+        return
+    tk = game["tokens"]
+    parts = txt(message).split()
+    qty = to_int(parts[1]) if len(parts) >= 2 else None
+    if qty is None:
+        await message.reply("⚠️ أرسل الآيدي ثم الكمية (رقم صحيح) وبينهما مسافة:")
+        return
+    if qty < tk["min"]:
+        await message.reply(f"⚠️ الحد الأدنى للكمية {tk['min']:,} توكن:")
+        return
+    if qty > 100_000_000:
+        await message.reply("⚠️ الكمية غير صالحة:")
+        return
+    price = await sell_price(cost_syp=qty * tk["unit_syp"])
+    await process_wallet_purchase(
+        message, message.from_user.id, "games", f"{game['name']} - توكنز ({qty:,})",
+        f"الآيدي: {parts[0][:100]}", price, state,
     )
 
 
@@ -1302,614 +2111,391 @@ async def process_global_order_data(message: types.Message, state: FSMContext):
 # =====================================================================
 # 14. برامج الشات
 # =====================================================================
-CHAT_APPS = {
-    # key: (اسم التطبيق, الوحدة, المعامل)
-    "soulstar": ("Soul Star", "كوينز", 0.025),
-    "soulchill": ("Soulchill", "كريستال", 0.30),
-    "imo": ("IMO", "ألماس", 0.50),
-    "talsa": ("Talsa chat", "كوينز", 0.02),
+# ---------------------------------------------------------------------
+# كتالوج تطبيقات الشات — أسعار الجملة بالليرة السورية.
+# صيغة السطر:  الاسم|الحد الأدنى|سعر الجملة عند الحد الأدنى|سعر الوحدة بعده
+#   - الكمية = الحد الأدنى بالضبط  → سعر الجملة الثابت
+#   - الكمية أكبر                   → الكمية × سعر الوحدة (ولا يقل عن سعر الحد الأدنى)
+# لإضافة تطبيق أو تعديل سعر: عدّل السطر فقط.
+# ---------------------------------------------------------------------
+CHAT_QTY_DATA = """
+Soul Star|10000|155.81|0.022
+Soulchill|1000|246.42|0.27
+SHABAB CHAT|50000|158.36|0.0035
+Siba Chat|10000|164.25|0.022
+Taka Chat|10000|144.58|0.012
+Yaahlan Chat|1000|252.69|0.27
+Migo Live|10000|167.10|0.022
+Beela Chat|1000|12.61|0.012
+Yoho|15000|217.84|0.012
+Up Live|1|2.03|2.07
+YoYo|1000|111.41|0.13
+SoulFa chat|1000|189.96|0.21
+Party Star|2000|298.55|0.17
+Super Live|200|186.52|0.95
+Habby Chat|1000|15.32|0.022
+Talk Talk|1500|176.37|0.14
+Ayome Chat|1500|206.84|0.16
+4Fun Chat|25000|222.48|0.012
+Poppo Live|15000|218.76|0.016
+Cocco Live|10000|151.85|0.017
+Oohla Chat|2000|207.44|0.12
+Hiya Chat|1500|224.92|0.17
+Majlis|1000|149.32|0.17
+Waho Live|10000|142.82|0.016
+Xena Live|10000|152.54|0.017
+HamiParty|15000|209.15|0.016
+HAWA CHAT|5000|400.57|0.10
+OPA LIVE|20000|237.70|0.014
+SO MATCH|10000|178.34|0.020
+HiParty|10000|154.09|0.017
+DANA CHAT|30000|175.56|0.008
+FUN UP|10000|153.63|0.017
+Binmo Chat|10000|557.46|0.058
+Amo Chat|10000|88.99|0.011
+Hiyoo|2500|35.31|0.016
+Amar Chat|3000|368.54|0.14
+Sama Chat|10000|120.46|0.014
+WAKI STAR|2000000|70.52|0.00004
+Salam Chat|200000|273.35|0.0016
+Habi|10000|149.62|0.017
+Pota live|100000|359.21|0.004
+RoStar|10000|281.38|0.031
+Halo Star|5000000|173.92|0.00004
+Top Top|100000|623.89|0.007
+LitChat|10000|255.15|0.028
+saya chat|10000|250.77|0.028
+Soodfa|50000|122.40|0.0027
+Saada|1500|234.51|0.18
+Fansy Live|10000|73.92|0.010
+sahra chat|10000|1030.18|0.11
+willchill|20000|234.46|0.013
+yoki|20000|167.29|0.010
+BoBo Chat|20000|131.76|0.008
+wadi chat|17500|131.24|0.009
+dika live|100000|173.06|0.002
+GIMME LIVE|10000|179.07|0.020
+yoparti|10000|299.69|0.033
+Junko|60000|168.99|0.003
+Likee|200|515.34|2.60
+Bigo Live|50|124.97|2.52
+Ahlan Chat|3000|164.26|0.06
+MicoChat|8000|375.91|0.05
+Azal Live|1500|99.21|0.07
+Tami Live|100000|208.40|0.0023
+Tada|1000|175.46|0.20
+LightChat|5000|180.26|0.04
+Sugo Chat|10000|201.15|0.022
+Lami Chat|2000|78.07|0.043
+Aswat chat|1500|151.35|0.11
+Soyo|15000|171.18|0.013
+Higo Chat|1000|149.84|0.17
+Layla chat|10000|325.30|0.036
+Yooy Chat|50000|130.45|0.0029
+mango live|10000|342.12|0.038
+Dimo Chat|1000|130.46|0.14
+Olamet Chat|12000|241.78|0.022
+honey jar chat|200|220.15|1.12
+Lama Chat|5000|123.26|0.027
+SoulChat|10000|212.03|0.023
+LigoLive|1000|173.28|0.19
+Kwai|200|305.18|1.55
+Allo|1000|12.59|0.014
+Star Maker chat|200|305.10|1.55
+Hoby chat|10000|113.17|0.013
+ASHA Chat|10000|165.15|0.018
+WASLA Chat|10000|436.56|0.048
+Wyak Chat|500000|148.57|0.00033
+Maza Chat|20000|177.98|0.010
+Dido Chat|2000|147.26|0.081
+Boli Chat|10000|133.64|0.015
+Halla Chat|10000|175.94|0.019
+LaYam Chat|10000|75.46|0.008
+OurTalk Chat|100000|345.81|0.0038
+Hayuki Chat|25000|180.63|0.008
+Fofo Chat|200000|242.99|0.0013
+Yayya Chat|10000|128.55|0.014
+Hopi Star|4000000|139.60|0.00004
+Hapi live|1000000|146.50|0.00016
+Yolo Chat|10000|1114.08|0.12
+Pocket chat|10000|338.19|0.037
+CARNI LIVE|1500|166.68|0.13
+Hart live|12000|141.81|0.013
+Laki chat|22000|153.29|0.008
+Rooh chat|15000|176.96|0.013
+Vostar Chat|200000|130.64|0.0007
+PAWA LIVE|20000|234.80|0.013
+Baat LIVE|10000|141.32|0.016
+Tayyb CHAT|1000000|103.68|0.00012
+HATI Chat|10000|24.81|0.0028
+Niu Chat|100000|126.82|0.0014
+BEST LIVE|500000|131.80|0.00029
+KESSMET CHAT|10000|724.84|0.080
+HOOB CHAT|50000|109.00|0.0024
+KARAK CHAT|70000|150.24|0.0024
+NIVI Chat|5000|162.68|0.036
+WIKOO|80000|115.95|0.0016
+YULA CHAT|50000|150.35|0.0033
+TI LIVE|120|130.12|1.19
+NAFASS|45000|118.60|0.0029
+RIXO CHAT|50000|109.26|0.0024
+WAHDA CHAT|15000|229.49|0.017
+MOMA LIVE|47500|147.12|0.0034
+TAYA CHAT|10000|155.75|0.017
+LOTFUN CHAT|50000|664.76|0.015
+SAHI LIVE|9200|146.39|0.018
+WAAW CHAT|40000|172.71|0.0048
+DAWA CHAT|70000|149.85|0.0024
+CHAMET|15000|360.90|0.026
+Lions Chat|10000|169.87|0.019
+Mr7ba chat|300000|15.02|0.00006
+Zaffa chat|55000|114.02|0.0023
+Hago chat|12500|169.04|0.015
+Mikoo chat|30000|162.24|0.006
+1STAR CHAT|10000|150.96|0.017
+NABD CHAT|100000|218.00|0.0024
+SOHHA LIVE|60000|158.10|0.0029
+Hoki chat|10000|161.85|0.018
+ZAAR CHAT|1000|5.80|0.0065
+up fun|25000|148.54|0.0066
+PEP LIVE|1500|229.83|0.17
+alulu chat|3250|136.71|0.046
+PIKA STAR|1250|139.95|0.12
+HIGH CHAT|1000|147.10|0.16
+SKY CHAT|1000|156.17|0.17
+haya|70|157.54|2.45
+ARIA CHAT|10000|149.99|0.017
+DITTO LIVE|3000|115.06|0.042
+SOUL U|1000|11.56|0.013
+LiveMe+|1000|1678.70|1.85
+iFun Chat|10000|122.09|0.013
+WEGO LIVE|15000|170.59|0.013
+Veco|10000|120.41|0.014
+SAWALFNA|10000|143.58|0.016
+KARAWAN|1000|135.80|0.15
+HALA ME|20000|125.30|0.007
+YOBI CHAT|5000|763.78|0.17
+PARTY HERO|100|14.85|0.16
+YUDO FUN|20000|117.68|0.007
+"""
+
+# تطبيقات بفئات ثابتة: الاسم → [(الفئة, السعر بالدولار)]
+CHAT_PACKS_DATA = {
+    "IMO": [("100 ألماسة", 1.89), ("200 ألماسة", 3.78), ("500 ألماسة", 9.46),
+            ("1000 ألماسة", 18.91), ("2000 ألماسة", 37.82), ("5000 ألماسة", 94.56)],
+    "Yalla Live": [("2900 ذهبة", 25.21), ("5900 ذهبة", 50.41), ("12500 ذهبة", 100.82)],
+    "Meyo": [("490 ألماس", 5.26), ("980 ألماس", 10.50), ("1960 ألماس", 20.97),
+             ("4900 ألماس", 52.14), ("9800 ألماس", 104.28)],
+    "TUMILE CHAT": [("650 ألماس", 3.80), ("1250 ألماس", 7.15), ("1800 ألماس", 9.91),
+                    ("3500 ألماس", 17.74), ("7000 ألماس", 34.95), ("15000 ألماس", 75.72),
+                    ("35000 ألماس", 177.91)],
+    "LIVU CHAT": [("360 ألماس", 2.89), ("650 ألماس", 3.72), ("1800 ألماس", 9.80),
+                  ("7000 ألماس", 34.95), ("15000 ألماس", 75.72), ("35000 ألماس", 177.91)],
 }
+
+
+def _build_chat_items():
+    items = []
+    for line in CHAT_QTY_DATA.strip().splitlines():
+        if not line.strip():
+            continue
+        name, mn, mp, un = [x.strip() for x in line.split("|")]
+        items.append({"name": name, "kind": "qty", "min": int(mn), "min_price": float(mp), "unit": float(un)})
+    for name, packs in CHAT_PACKS_DATA.items():
+        items.append({"name": name, "kind": "packs", "packs": packs})
+    items.sort(key=lambda x: x["name"].lower())
+    return items
+
+
+CHAT_ITEMS = _build_chat_items()
+CHAT_PER_PAGE = 10
+
+
+async def chat_qty_cost(item: dict, qty: int) -> float:
+    """تكلفة الجملة: الحد الأدنى بالضبط = السعر الثابت، وما فوقه = الكمية × سعر الوحدة (بحد أدنى سعر الحد الأدنى)."""
+    if qty == item["min"]:
+        return item["min_price"]
+    return max(item["min_price"], qty * item["unit"])
+
+
+async def chat_qty_price(item: dict, qty: int) -> int:
+    # أسعار الشات بالكمية ثابتة بالليرة ولا تتبع سعر الدولار
+    return await sell_price(cost_syp=await chat_qty_cost(item, qty), section="chat")
+
+
+async def show_chat_list(cb: types.CallbackQuery, page: int):
+    total = max(1, (len(CHAT_ITEMS) + CHAT_PER_PAGE - 1) // CHAT_PER_PAGE)
+    page = min(max(page, 0), total - 1)
+    start = page * CHAT_PER_PAGE
+    buttons = [B(f"💬 {it['name']}", f"ca:{start + i}") for i, it in enumerate(CHAT_ITEMS[start:start + CHAT_PER_PAGE])]
+    rows = [[B("🔍 بحث عن تطبيق بالاسم", "chat_search")]] + rows_of(buttons, 2)
+    nav = []
+    if page > 0:
+        nav.append(B("⬅️ السابق", f"cl:{page - 1}"))
+    if page < total - 1:
+        nav.append(B("التالي ➡️", f"cl:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([B("🔍 تطبيق غير موجود [طلب تسعير]", "quote:chat")])
+    rows.append([B("🔙 العودة للرئيسية", "back_home")])
+    await safe_edit(cb, f"💬 <b>اختر تطبيق الشات المطلوب</b> (صفحة {page + 1} من {total}):", KB(rows))
 
 
 @dp.callback_query(F.data == "sec:chat")
 async def chat_menu(cb: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await safe_edit(cb, "💬 <b>اختر تطبيق الشات المطلوب:</b>", KB([
-        [B("🌟 Soul Star (كوينز × 0.025)", "chat_calc:soulstar")],
-        [B("❄️ Soulchill (كريستال × 0.30)", "chat_calc:soulchill")],
-        [B("💬 IMO (ألماس × 0.50)", "chat_calc:imo")],
-        [B("🗣 Talsa chat (كوينز × 0.02)", "chat_calc:talsa")],
-        [B("🔍 باقي التطبيقات [طلب تسعير]", "quote:chat")],
-        [B("🔙 العودة للرئيسية", "back_home")],
-    ]))
+    await show_chat_list(cb, 0)
 
 
-@dp.callback_query(F.data.startswith("chat_calc:"))
-async def chat_calc_prompt(cb: types.CallbackQuery, state: FSMContext):
-    await state.update_data(c_app=cb.data.split(":")[1])
-    await state.set_state(ChatInput.entering_data)
-    await safe_edit(cb, "💬 أدخل (الآيدي) متبوعاً بـ (الكمية المطلوبة):\nمثال: <code>123456 5000</code>", cancel_kb("sec:chat"))
+@dp.callback_query(F.data.startswith("cl:"))
+async def chat_list_page(cb: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await show_chat_list(cb, int(cb.data.split(":")[1]))
+
+
+@dp.callback_query(F.data == "chat_search")
+async def chat_search_start(cb: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(ChatSearch.query)
+    await safe_edit(cb, "🔍 اكتب اسم التطبيق أو جزءاً منه (مثال: <code>soul</code>):", cancel_kb("sec:chat"))
+
+
+@dp.message(ChatSearch.query)
+async def chat_search_receive(message: types.Message, state: FSMContext):
+    q = txt(message).lower().replace(" ", "")
+    if len(q) < 2:
+        await message.reply("⚠️ اكتب حرفين على الأقل:")
+        return
+    found = [(i, it) for i, it in enumerate(CHAT_ITEMS) if q in it["name"].lower().replace(" ", "")][:12]
+    if not found:
+        await message.reply("لا توجد نتائج. جرّب اسماً آخر، أو اطلب تسعيراً للتطبيق:", reply_markup=KB([
+            [B("🔍 طلب تسعير تطبيق", "quote:chat")], [B("🔙 قائمة التطبيقات", "sec:chat")]]))
+        return
+    await state.clear()
+    rows = rows_of([B(f"💬 {it['name']}", f"ca:{i}") for i, it in found], 2)
+    rows.append([B("🔍 بحث جديد", "chat_search"), B("🔙 القائمة", "sec:chat")])
+    await message.answer(f"🔍 نتائج البحث ({len(found)}):", reply_markup=KB(rows))
+
+
+@dp.callback_query(F.data.startswith("ca:"))
+async def chat_app_view(cb: types.CallbackQuery, state: FSMContext):
+    idx = int(cb.data.split(":")[1])
+    it = CHAT_ITEMS[idx]
+    back = f"cl:{idx // CHAT_PER_PAGE}"
+    await state.clear()
+    if it["kind"] == "qty":
+        margin = await get_setting("margin_chat")
+        unit_sell = it["unit"] * (1 + margin / 100)
+        price_min = await chat_qty_price(it, it["min"])
+        await state.update_data(c_idx=idx)
+        await state.set_state(ChatInput.entering_data)
+        await safe_edit(
+            cb,
+            f"💬 <b>{esc(it['name'])}</b>\n"
+            f"────────────────────────────\n"
+            f"📉 الحد الأدنى: <b>{it['min']:,}</b> = <b>{price_min:,} ل.س</b>\n"
+            f"📈 ما فوق الحد الأدنى: <b>{unit_sell:.5f}</b> ل.س للوحدة\n"
+            f"────────────────────────────\n"
+            f"أرسل الآيدي ثم الكمية وبينهما مسافة:\nمثال: <code>123456 {it['min']}</code>",
+            cancel_kb(back),
+        )
+    else:
+        rows = []
+        for pi, (label, usd) in enumerate(it["packs"]):
+            price = await sell_price(cost_usd=usd, section="chat")
+            rows.append([B(f"{label} ⬅ {price:,} ل.س", f"cp:{idx}:{pi}")])
+        rows.append([B("🔙 رجوع", back)])
+        await safe_edit(cb, f"💬 <b>{esc(it['name'])}</b>\nاختر الباقة:", KB(rows))
+
+
+@dp.callback_query(F.data.startswith("cp:"))
+async def chat_pack_buy(cb: types.CallbackQuery, state: FSMContext):
+    _, idx_s, pi_s = cb.data.split(":")
+    it = CHAT_ITEMS[int(idx_s)]
+    label, usd = it["packs"][int(pi_s)]
+    price = await sell_price(cost_usd=usd, section="chat")  # السعر من الخادم دائماً
+    await state.clear()
+    await state.update_data(g_dept="games", g_service=f"{it['name']} - {label}", g_price=price)
+    await state.set_state(GlobalOrderState.input_data)
+    await safe_edit(cb, f"💬 لقد اخترت: <b>{esc(it['name'])} - {esc(label)}</b> ({price:,} ل.س)\n\nأرسل آيدي اللاعب:", cancel_kb(f"ca:{idx_s}"))
 
 
 @dp.message(ChatInput.entering_data)
 async def proc_chat_calc_receive(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    app = CHAT_APPS.get(data.get("c_app", ""))
-    if not app:
+    idx = data.get("c_idx")
+    if idx is None or not (0 <= int(idx) < len(CHAT_ITEMS)) or CHAT_ITEMS[int(idx)]["kind"] != "qty":
         await state.clear()
-        await message.answer("⚠️ انتهت الجلسة، يرجى الاختيار من جديد.", reply_markup=HOME_KB)
+        await message.answer("⚠️ انتهت الجلسة، يرجى الاختيار من جديد.", reply_markup=KB([[B("💬 قائمة التطبيقات", "sec:chat")]]))
         return
+    it = CHAT_ITEMS[int(idx)]
     parts = txt(message).split()
     qty = to_int(parts[1]) if len(parts) >= 2 else None
     if qty is None:
         await message.reply("⚠️ أرسل الآيدي ثم الكمية (رقم صحيح) وبينهما مسافة:")
         return
-    if qty <= 0 or qty > 1_000_000_000:
+    if qty < it["min"]:
+        await message.reply(f"⚠️ الحد الأدنى للكمية في {esc(it['name'])} هو {it['min']:,}:")
+        return
+    if qty > 10_000_000_000:
         await message.reply("⚠️ الكمية غير صالحة:")
         return
-    name, unit, factor = app
-    price = round(qty * factor)
-    if price < 1:
-        await message.reply("⚠️ الكمية قليلة جداً، يرجى زيادتها:")
-        return
+    price = await chat_qty_price(it, qty)
     await process_wallet_purchase(
-        message, message.from_user.id, "games", f"{name} ({qty:,} {unit})", f"الآيدي: {parts[0][:100]}", price, state
+        message, message.from_user.id, "games", f"{it['name']} ({qty:,})", f"الآيدي: {parts[0][:100]}", price, state
     )
 
 
 # =====================================================================
 # 15. الحسابات الجاهزة
 # =====================================================================
+async def show_accounts_list(cb: types.CallbackQuery, page: int):
+    keys = list(ACCOUNTS_CATALOG.keys())
+    total = max(1, (len(keys) + ACCOUNTS_PER_PAGE - 1) // ACCOUNTS_PER_PAGE)
+    page = min(max(page, 0), total - 1)
+    chunk = keys[page * ACCOUNTS_PER_PAGE:(page + 1) * ACCOUNTS_PER_PAGE]
+    rows = rows_of([B(f"{ACCOUNTS_CATALOG[k]['emoji']} {ACCOUNTS_CATALOG[k]['name']}", f"ac:{k}") for k in chunk], 2)
+    nav = []
+    if page > 0:
+        nav.append(B("⬅️ السابق", f"al:{page - 1}"))
+    if page < total - 1:
+        nav.append(B("التالي ➡️", f"al:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([B("📋 حساب غير موجود [طلب تسعير]", "quote:acc")])
+    rows.append([B("🔙 العودة للرئيسية", "back_home")])
+    await safe_edit(cb, f"📦 <b>اختر الحساب المطلوب</b> (صفحة {page + 1} من {total}):", KB(rows))
+
+
 @dp.callback_query(F.data == "sec:accounts")
 async def accounts_home(cb: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    rows = [[B(f"🔹 {n} ({p:,} ل.س)", f"facc:{k}")] for k, (n, p) in FAST_ACCOUNTS.items()]
-    rows.append([B(f"📋 باقي الحسابات ({len(ACCOUNTS_LIST)} خدمة)", "acc_page:0")])
-    rows.append([B("🔙 العودة للرئيسية", "back_home")])
-    await safe_edit(cb, "📦 <b>اختر الحساب الجاهز المطلوب:</b>", KB(rows))
+    await show_accounts_list(cb, 0)
 
 
-@dp.callback_query(F.data.startswith("facc:"))
-async def acc_fast_confirm(cb: types.CallbackQuery, state: FSMContext):
-    name, price = FAST_ACCOUNTS[cb.data.split(":")[1]]
-    await process_wallet_purchase(cb, cb.from_user.id, "accounts", f"حساب {name}", "حساب رسمي مع الضمان", price, state)
+@dp.callback_query(F.data.startswith("al:"))
+async def accounts_page(cb: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await show_accounts_list(cb, int(cb.data.split(":")[1]))
 
 
-@dp.callback_query(F.data.startswith("acc_page:"))
-async def extra_accounts_pages(cb: types.CallbackQuery):
-    page = int(cb.data.split(":")[1])
-    total_pages = (len(ACCOUNTS_LIST) + ACCOUNTS_PER_PAGE - 1) // ACCOUNTS_PER_PAGE
-    start = page * ACCOUNTS_PER_PAGE
-    end = start + ACCOUNTS_PER_PAGE
-    rows = [[B(f"🔹 {item}", f"sel_acc:{start + i}")] for i, item in enumerate(ACCOUNTS_LIST[start:end])]
-    nav = []
-    if page > 0:
-        nav.append(B("⬅️ السابق", f"acc_page:{page - 1}"))
-    if end < len(ACCOUNTS_LIST):
-        nav.append(B("التالي ➡️", f"acc_page:{page + 1}"))
-    if nav:
-        rows.append(nav)
+@dp.callback_query(F.data.startswith("ac:"))
+async def account_view(cb: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    key = cb.data.split(":")[1]
+    acc = ACCOUNTS_CATALOG[key]
+    rows = []
+    for i, (label, usd) in enumerate(acc["packs"]):
+        price = await sell_price(cost_usd=usd, section="accounts")
+        rows.append([B(f"{label} ⬅ {price:,} ل.س", f"ab:{key}:{i}")])
     rows.append([B("🔙 رجوع للحسابات", "sec:accounts")])
-    await safe_edit(cb, f"📦 <b>اختر الحساب المطلوب (صفحة {page + 1} من {total_pages}):</b>", KB(rows))
-
-
-@dp.callback_query(F.data.startswith("sel_acc:"))
-async def account_select_duration(cb: types.CallbackQuery, state: FSMContext):
-    acc_name = ACCOUNTS_LIST[int(cb.data.split(":")[1])]
-    await state.update_data(selected_acc_name=acc_name)
-    await safe_edit(cb, f"لقد اخترت: <b>{esc(acc_name)}</b>\n\nاختر المدة المطلوبة بالضغط على الزر أدناه:", KB([
-        [B("⏳ اشتراك شهر", "acc_dur:شهر")],
-        [B("⏳ اشتراك 3 أشهر", "acc_dur:3 أشهر")],
-        [B("⏳ اشتراك سنة", "acc_dur:سنة")],
-        [B("🔙 رجوع للقائمة", "acc_page:0")],
-    ]))
-
-
-@dp.callback_query(F.data.startswith("acc_dur:"))
-async def account_duration_finish(cb: types.CallbackQuery, state: FSMContext):
-    dur = cb.data.split(":", 1)[1]
-    data = await state.get_data()
-    acc_name = data.get("selected_acc_name")
-    if not acc_name:
-        await safe_edit(cb, "⚠️ انتهت الجلسة، يرجى اختيار الحساب من جديد.", KB([[B("📋 قائمة الحسابات", "acc_page:0")]]))
-        return
-    text_to_group = (
-        f"📩 <b>طلب تسعير حساب جديد:</b>\n"
-        f"👤 الزبون: {user_tag(cb.from_user)} (<code>{cb.from_user.id}</code>)\n"
-        f"🔑 UID: <code>{cb.from_user.id}</code>\n"
-        f"🏷 الحساب: <b>{esc(acc_name)}</b>\n"
-        f"⏳ المدة: <b>{esc(dur)}</b>\n\n"
-        f"💡 لتسعير الطلب والرد على الزبون، قم بعمل رد (Reply) مباشر على هذه الرسالة."
-    )
-    await send_to_staff(GROUPS["accounts"], text_to_group)
-    await state.clear()
-    await safe_edit(
-        cb,
-        f"✅ تم إرسال طلبك لحساب <b>{esc(acc_name)}</b> (مدة: {esc(dur)}) للإدارة بنجاح.\n"
-        f"سيتم مراجعته والرد عليك هنا بالتفاصيل والسعر قريباً.",
-        HOME_KB,
-    )
-
-
-# =====================================================================
-# 16. السوشيال ميديا والإعلانات
-# =====================================================================
-@dp.callback_query(F.data == "sec:social")
-async def social_menu(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await safe_edit(cb, "🚀 <b>اختر منصة السوشيال ميديا:</b>", KB([
-        [B("📘 خدمات فيسبوك", "soc:fb")],
-        [B("📸 خدمات إنستغرام", "soc:ig")],
-        [B("✈ خدمات تلغرام", "soc:tg")],
-        [B("📢 إعلانات ممولة فيسبوك", "soc:ads")],
-        [B("🔙 العودة للرئيسية", "back_home")],
-    ]))
-
-
-@dp.callback_query(F.data.startswith("soc:"))
-async def soc_platforms(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    plat = cb.data.split(":")[1]
-    if plat in ("fb", "ig", "tg"):
-        rows = [[B(f"🔹 {t} ({p:,} ل.س)", f"spk:{code}")] for code, (t, p, pt) in SOCIAL_PACKS.items() if pt == plat]
-        rows.append([B("🔙 رجوع", "sec:social")])
-        await safe_edit(cb, "🚀 <b>اختر الباقة المطلوبة:</b>", KB(rows))
-    elif plat == "ads":
-        buttons = [B(f"إعلان {d} أيام ⬅ {p:,} ل.س", f"ad_f:{d}") for d, p in AD_PACKS.items()]
-        rows = rows_of(buttons, 2)
-        rows.append([B(f"⚙ مدة مخصصة ({AD_DAY_PRICE} ل.س/يوم)", "ad_c")])
-        rows.append([B("🔙 رجوع", "sec:social")])
-        await safe_edit(cb, "📢 <b>اختر مدة الإعلان الممول:</b>", KB(rows))
-
-
-@dp.callback_query(F.data.startswith("spk:"))
-async def soc_buy_pack(cb: types.CallbackQuery, state: FSMContext):
-    title, price, plat = SOCIAL_PACKS[cb.data.split(":")[1]]
-    await state.update_data(g_dept="social", g_service=f"{plat.upper()} - {title}", g_price=int(price))
-    await state.set_state(GlobalOrderState.input_data)
-    await safe_edit(
-        cb, f"🚀 لقد اخترت: <b>{plat.upper()} - {esc(title)}</b> ({price:,} ل.س)\n\nأرسل رابط الحساب أو المنشور المطلوب:",
-        cancel_kb(f"soc:{plat}"),
-    )
-
-
-@dp.callback_query(F.data.startswith("ad_f:"))
-async def ad_f_click(cb: types.CallbackQuery, state: FSMContext):
-    d = int(cb.data.split(":")[1])
-    price = AD_PACKS[d]  # السعر من الخادم وليس من بيانات الزر
-    await state.update_data(g_dept="social", g_service=f"إعلان ممول فيسبوك ({d} أيام)", g_price=price)
-    await state.set_state(GlobalOrderState.input_data)
-    await safe_edit(
-        cb, f"📢 لقد اخترت: <b>إعلان ممول ({d} أيام)</b> ({price:,} ل.س)\n\nأدخل رقم هاتفك للتواصل وتجهيز تفاصيل الإعلان:",
-        cancel_kb("soc:ads"),
-    )
-
-
-@dp.callback_query(F.data == "ad_c")
-async def ad_c_click(cb: types.CallbackQuery, state: FSMContext):
-    await state.set_state(CustomAd.days)
-    await safe_edit(cb, f"📢 أدخل عدد الأيام المطلوبة للإعلان (اليوم = {AD_DAY_PRICE} ل.س):", cancel_kb("soc:ads"))
-
-
-@dp.message(CustomAd.days)
-async def proc_custom_ad_days(message: types.Message, state: FSMContext):
-    days = to_int(txt(message))
-    if not days or days <= 0 or days > 365:
-        await message.reply("⚠️ عدد الأيام يجب أن يكون رقماً صحيحاً بين 1 و 365:")
-        return
-    price = days * AD_DAY_PRICE
-    await state.update_data(g_dept="social", g_service=f"إعلان مخصص فيسبوك ({days} أيام)", g_price=price)
-    await state.set_state(GlobalOrderState.input_data)
-    await message.answer(f"📢 الإجمالي: <b>{price:,} ل.س</b>\n\nأدخل رقم هاتفك للتواصل لتجهيز الإعلان:")
-
-
-# =====================================================================
-# 17. أرقام التفعيل
-# =====================================================================
-@dp.callback_query(F.data == "sec:numbers")
-async def numbers_home(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    p_wa = int(await get_setting("num_whatsapp"))
-    p_tg = int(await get_setting("num_telegram"))
-    await safe_edit(cb, "📱 <b>قسم أرقام التفعيل:</b>", KB([
-        [B(f"🟢 رقم واتساب أجنبي ({p_wa:,} ل.س)", "buyn:whatsapp")],
-        [B(f"🔵 رقم تلغرام أمريكي ({p_tg:,} ل.س)", "buyn:telegram")],
-        [B("📱 رقم تيك توك [طلب تسعير]", "quote:num_tiktok")],
-        [B("🌐 تفعيل غوغل [طلب تسعير]", "quote:num_google")],
-        [B("🍎 تفعيل آبل [طلب تسعير]", "quote:num_apple")],
-        [B("🔙 العودة للرئيسية", "back_home")],
-    ]))
-
-
-@dp.callback_query(F.data.startswith("buyn:"))
-async def buy_num_fast(cb: types.CallbackQuery, state: FSMContext):
-    target = cb.data.split(":")[1]
-    key = "num_whatsapp" if target == "whatsapp" else "num_telegram"
-    name = "واتساب أجنبي" if target == "whatsapp" else "تلغرام أمريكي"
-    price = int(await get_setting(key))
-    await process_wallet_purchase(cb, cb.from_user.id, "social", f"رقم {name}", "تسليم كود تفعيل فوري", price, state)
-
-
-# =====================================================================
-# 18. طلبات التسعير والدعم الفني
-# =====================================================================
-@dp.callback_query(F.data.startswith("quote:"))
-async def generic_quote_start(cb: types.CallbackQuery, state: FSMContext):
-    g_map = {
-        "game": ("games", "🎮 طلب تسعير لعبة"),
-        "chat": ("games", "💬 طلب تسعير تطبيق شات"),
-        "num_tiktok": ("social", "📱 طلب رقم تيك توك"),
-        "num_google": ("social", "🌐 طلب تفعيل غوغل"),
-        "num_apple": ("social", "🍎 طلب تفعيل آبل"),
-    }
-    sec, label = g_map.get(cb.data.split(":")[1], ("games", "طلب عام"))
-    await state.update_data(q_sec=sec, q_label=label)
-    await state.set_state(GlobalOrderState.quote_text)
-    await safe_edit(cb, f"✍️ يرجى كتابة تفاصيل <b>{label}</b> بالتفصيل:\n(الاسم + المعرف أو الآيدي + الكمية المطلوبة):", cancel_kb())
-
-
-@dp.message(GlobalOrderState.quote_text)
-async def generic_quote_receive(message: types.Message, state: FSMContext):
-    if not txt(message):
-        await message.reply("⚠️ يرجى إرسال تفاصيل الطلب كنص:")
-        return
-    data = await state.get_data()
-    group_id = GROUPS.get(data.get("q_sec", "games"), GROUPS["games"])
-    label = data.get("q_label", "طلب تسعير")
-    text_to_group = (
-        f"📩 <b>{esc(label)}:</b>\n"
-        f"👤 الزبون: {user_tag(message.from_user)} (<code>{message.from_user.id}</code>)\n"
-        f"🔑 UID: <code>{message.from_user.id}</code>\n"
-        f"📝 <b>التفاصيل:</b>\n{esc(txt(message)[:3000])}\n\n"
-        f"💡 لتسعير الطلب والرد على الزبون، قم بعمل رد (Reply) مباشر على هذه الرسالة واكتب السعر والتفاصيل."
-    )
-    await send_to_staff(group_id, text_to_group)
-    await state.clear()
-    await message.answer("✅ تم استلام طلبك وإرساله للإدارة بنجاح. سيتم مراجعته والرد عليك هنا قريباً بالسعر.", reply_markup=HOME_KB)
-
-
-@dp.callback_query(F.data == "sec:support")
-async def support_start(cb: types.CallbackQuery, state: FSMContext):
-    await state.set_state(GlobalOrderState.support_msg)
-    await safe_edit(cb, "🛠 <b>اكتب استفسارك أو مشكلتك بالتفصيل وسيقوم فريق الدعم بالرد عليك هنا:</b>", cancel_kb())
-
-
-@dp.message(GlobalOrderState.support_msg)
-async def support_forward(message: types.Message, state: FSMContext):
-    if not txt(message):
-        await message.reply("⚠️ يرجى كتابة الاستفسار كنص:")
-        return
-    pending = await WalletService.last_pending_order(message.from_user.id)
-    pend_line = f"📦 آخر طلب معلق: <code>{pending[0]}</code> ({esc(pending[1])})\n" if pending else ""
-    text_to_group = (
-        f"📩 <b>تذكرة دعم فني جديدة:</b>\n"
-        f"👤 الزبون: {user_tag(message.from_user)} (<code>{message.from_user.id}</code>)\n"
-        f"🔑 UID: <code>{message.from_user.id}</code>\n"
-        f"{pend_line}\n"
-        f"📝 <b>الرسالة:</b>\n{esc(txt(message)[:3000])}\n\n"
-        f"💡 للرد على الزبون، قم بعمل رد (Reply) مباشر على هذه الرسالة."
-    )
-    await send_to_staff(GROUPS["support"], text_to_group)
-    await state.clear()
-    await message.answer("✅ تم إرسال رسالتك للدعم الفني، سنرد عليك هنا بأقرب وقت.", reply_markup=HOME_KB)
-
-
-# =====================================================================
-# 19. إجراءات المجموعات (المشرفون)
-# =====================================================================
-def in_staff_group(cb: types.CallbackQuery) -> bool:
-    return isinstance(cb.message, types.Message) and cb.message.chat.id in ALL_ADMIN_GROUPS
-
-
-@dp.callback_query(F.data.startswith("ord_act:"))
-async def handle_staff_order_action(cb: types.CallbackQuery):
-    if not in_staff_group(cb):
-        await cb.answer("⛔ غير مصرح.", show_alert=True)
-        return
-    _, action, ord_id = cb.data.split(":")
-
-    if action == "done":
-        res = await WalletService.complete_order(ord_id)
-        if not res:
-            await cb.answer("⚠️ الطلب غير موجود أو تم اتخاذ إجراء عليه مسبقاً!", show_alert=True)
-            return
-        cust_id, s_name = res
-        try:
-            await bot.send_message(cust_id, f"🎉 <b>تم تنفيذ طلبك بنجاح!</b>\n📦 الخدمة: <b>{esc(s_name)}</b>\n🆔 رقم الطلب: <code>{ord_id}</code>")
-        except Exception as e:
-            log.warning("notify customer failed: %s", e)
-        await append_status(cb.message, "🟢 <b>تم التنفيذ بنجاح</b>")
-
-    elif action == "ref":
-        ok, uid, amt = await WalletService.refund(ord_id)
-        if not ok:
-            await cb.answer("⚠️ تعذر الاسترجاع: الطلب معالج مسبقاً أو غير موجود.", show_alert=True)
-            return
-        try:
-            await bot.send_message(uid, f"↩️ <b>تم إلغاء الطلب {ord_id}</b> وإعادة مبلغ <b>{amt:,} ل.س</b> إلى محفظتك.")
-        except Exception as e:
-            log.warning("notify customer failed: %s", e)
-        await append_status(cb.message, "🟡 <b>تم الإلغاء واسترجاع الرصيد للمحفظة</b>")
-
-
-@dp.callback_query(F.data.startswith("adm_pay:"))
-async def handle_admin_payment_action(cb: types.CallbackQuery):
-    if not in_staff_group(cb):
-        await cb.answer("⛔ غير مصرح.", show_alert=True)
-        return
-    _, act, pay_id = cb.data.split(":")
-
-    if act == "ok":
-        res = await WalletService.approve_payment(pay_id)
-        if not res:
-            await cb.answer("⚠️ تمت معالجة هذه الدفعة مسبقاً أو حدث خطأ!", show_alert=True)
-            return
-        u_id, amt, new_bal = res
-        try:
-            await bot.send_message(
-                u_id,
-                f"🎉 <b>تم تأكيد إيداعك بنجاح!</b>\n➕ تمت إضافة: <b>{amt:,} ل.س</b>\n💳 رصيدك الحالي: <code>{new_bal:,} ل.س</code>\n\nيمكنك الآن الشراء الفوري بضغطة زر واحدة!",
-            )
-        except Exception as e:
-            log.warning("notify customer failed: %s", e)
-        await append_status(cb.message, f"🟢 <b>تم قبول الإيداع ({amt:,} ل.س)</b>")
-    else:
-        u_id = await WalletService.decline_payment(pay_id)
-        if u_id is None:
-            await cb.answer("⚠️ تمت معالجة هذه الدفعة مسبقاً!", show_alert=True)
-            return
-        try:
-            await bot.send_message(u_id, f"❌ نعتذر منك، تم رفض إشعار الإيداع للدفعة <code>{pay_id}</code> لعدم تطابق التحويل.")
-        except Exception as e:
-            log.warning("notify customer failed: %s", e)
-        await append_status(cb.message, "🔴 <b>تم رفض الإيداع</b>")
-
-
-async def extract_customer_id(orig_text: str) -> Optional[int]:
-    """استخراج آيدي الزبون: UID أولاً، ثم سطر الزبون، ثم رقم الطلب/الدفعة من قاعدة البيانات، ثم أي رقم بين قوسين."""
-    m = re.search(r"UID:\s*(\d{5,15})", orig_text)
-    if m:
-        return int(m.group(1))
-    m = re.search(r"الزبون:.*?\((\d{5,15})\)", orig_text)
-    if m:
-        return int(m.group(1))
-    m = re.search(r"\b((?:ORD|PAY)-[0-9A-Z]+-[0-9A-Z]+)\b", orig_text)
-    if m:
-        uid = await WalletService.user_by_reference(m.group(1))
-        if uid:
-            return uid
-    m = re.search(r"\((\d{6,15})\)", orig_text)
-    return int(m.group(1)) if m else None
-
-
-@dp.message(F.reply_to_message, F.chat.id.in_(ALL_ADMIN_GROUPS))
-async def admin_group_direct_reply(message: types.Message):
-    replied = message.reply_to_message
-    if not replied.from_user or replied.from_user.id != bot.id:
-        return
-    admin_text = message.text or message.caption
-    if not admin_text or admin_text.startswith("/"):
-        return
-
-    orig_text = replied.text or replied.caption or ""
-    cust_id = await extract_customer_id(orig_text)
-    if not cust_id:
-        await message.reply("⚠️ تعذر استخراج آيدي الزبون من الرسالة التي رددت عليها.")
-        return
-    try:
-        await bot.send_message(cust_id, f"💬 <b>إشعار من الإدارة بخصوص طلبك:</b>\n\n{esc(admin_text)}")
-        await message.reply("✅ تم تسليم الرد للعميل بنجاح.")
-    except TelegramForbiddenError:
-        await message.reply("⚠️ تعذر الإرسال: قام العميل بحظر البوت.")
-    except TelegramRetryAfter as e:
-        await asyncio.sleep(e.retry_after)
-        try:
-            await bot.send_message(cust_id, f"💬 <b>إشعار من الإدارة بخصوص طلبك:</b>\n\n{esc(admin_text)}")
-            await message.reply("✅ تم تسليم الرد للعميل بنجاح.")
-        except Exception as e2:
-            await message.reply(f"⚠️ فشل تسليم الرسالة: {esc(str(e2))}")
-    except Exception as e:
-        await message.reply(f"⚠️ فشل تسليم الرسالة: {esc(str(e))}")
-
-
-# =====================================================================
-# 20. لوحة المدير
-# =====================================================================
-@dp.callback_query(F.data == "adm:home")
-async def adm_home_return(cb: types.CallbackQuery, state: FSMContext):
-    if cb.from_user.id != ADMIN_ID:
-        return
-    await state.clear()
-    await safe_edit(cb, ADMIN_TITLE, admin_kb())
-
-
-@dp.callback_query(F.data == "adm:stats")
-async def adm_stats_view(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        return
-    async with get_db() as db:
-        total_users = (await (await db.execute("SELECT COUNT(*) FROM users")).fetchone())[0]
-        total_orders = (await (await db.execute("SELECT COUNT(*) FROM orders")).fetchone())[0]
-        pending = (await (await db.execute("SELECT COUNT(*) FROM orders WHERE status='PROCESSING'")).fetchone())[0]
-        done = (await (await db.execute("SELECT COUNT(*) FROM orders WHERE status='COMPLETED'")).fetchone())[0]
-        income = (await (await db.execute("SELECT SUM(amount) FROM payments WHERE status='ACCEPTED'")).fetchone())[0] or 0
-        liab = (await (await db.execute("SELECT SUM(balance) FROM users")).fetchone())[0] or 0
-    rate = await get_setting("dollar_rate")
-    text = (
-        f"📊 <b>إحصائيات المنصة الشاملة:</b>\n"
-        f"────────────────────────────\n"
-        f"👥 إجمالي المستخدمين: <b>{total_users:,}</b>\n"
-        f"📦 إجمالي الطلبات: <b>{total_orders:,}</b> (منفذ: {done:,} | معلق: {pending:,})\n"
-        f"💰 إجمالي الإيداعات المقبولة: <b>{income:,} ل.س</b>\n"
-        f"🏦 إجمالي أرصدة الزبائن: <b>{liab:,} ل.س</b>\n"
-        f"💱 سعر صرف الدولار الحالي: <b>{rate:,.2f} ل.س</b>\n"
-    )
-    await safe_edit(cb, text, KB([[B("🔙 رجوع", "adm:home")]]))
-
-
-@dp.callback_query(F.data == "adm:set_rate")
-async def adm_set_rate_start(cb: types.CallbackQuery, state: FSMContext):
-    if cb.from_user.id != ADMIN_ID:
-        return
-    await state.set_state(AdminActions.set_dollar_rate)
-    rate = await get_setting("dollar_rate")
-    await safe_edit(cb, f"💱 سعر الصرف الحالي: <b>{rate:,.2f} ل.س</b>\n\nأدخل سعر صرف الدولار الجديد بالليرة السورية:", cancel_kb("adm:home"))
-
-
-@dp.message(AdminActions.set_dollar_rate)
-async def adm_set_rate_rec(message: types.Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
-        return
-    try:
-        val = float(txt(message).replace(",", ""))
-        if not (0 < val < 1e9) or val != val:
-            raise ValueError
-    except ValueError:
-        await message.reply("⚠️ أدخل قيمة صحيحة أكبر من صفر:")
-        return
-    await update_setting("dollar_rate", val)
-    await state.clear()
-    await message.reply(f"✅ تم تحديث سعر صرف الدولار إلى: <b>{val:,.2f} ل.س</b>")
-
-
-@dp.callback_query(F.data == "adm:add_bal")
-async def adm_add_bal_start(cb: types.CallbackQuery, state: FSMContext):
-    if cb.from_user.id != ADMIN_ID:
-        return
-    await state.set_state(AdminActions.add_bal_user)
-    await safe_edit(cb, "👤 أدخل آيدي المستخدم (User ID) المراد تغذية رصيده:", cancel_kb("adm:home"))
-
-
-@dp.message(AdminActions.add_bal_user)
-async def adm_add_bal_user_rec(message: types.Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
-        return
-    u_id = to_int(txt(message))
-    if not u_id:
-        await message.reply("⚠️ يرجى إدخال آيدي صحيح بالأرقام:")
-        return
-    await state.update_data(target_uid=u_id)
-    await state.set_state(AdminActions.add_bal_amount)
-    await message.answer(f"💵 أدخل المبلغ المراد إضافته لحساب <code>{u_id}</code>:")
-
-
-@dp.message(AdminActions.add_bal_amount)
-async def adm_add_bal_amt_rec(message: types.Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
-        return
-    amt = to_int(txt(message))
-    if not amt or amt <= 0:
-        await message.reply("⚠️ المبلغ يجب أن يكون رقماً صحيحاً وأكبر من صفر:")
-        return
-    data = await state.get_data()
-    u_id = data.get("target_uid")
-    await state.clear()
-    if not u_id:
-        await message.reply("⚠️ انتهت الجلسة، أعد المحاولة من /admin")
-        return
-    await WalletService.get_or_create_user(u_id)
-    ok = await WalletService.deposit(u_id, amt, generate_uid("ADM"), "تغذية إدارية مباشرة")
-    if ok:
-        await message.reply(f"✅ تم إضافة <b>{amt:,} ل.س</b> بنجاح للمستخدم <code>{u_id}</code>.")
-        try:
-            await bot.send_message(u_id, f"🎉 <b>تمت إضافة {amt:,} ل.س إلى رصيد محفظتك من الإدارة!</b>")
-        except Exception:
-            pass
-    else:
-        await message.reply("❌ تعذر إضافة الرصيد.")
-
-
-@dp.callback_query(F.data == "adm:broadcast")
-async def adm_broadcast_start(cb: types.CallbackQuery, state: FSMContext):
-    if cb.from_user.id != ADMIN_ID:
-        return
-    await state.set_state(AdminActions.broadcast_msg)
-    await safe_edit(cb, "📢 أرسل نص الرسالة التي تريد إذاعتها لجميع المستخدمين:", cancel_kb("adm:home"))
-
-
-@dp.message(AdminActions.broadcast_msg)
-async def adm_broadcast_rec(message: types.Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
-        return
-    if not txt(message):
-        await message.reply("⚠️ أرسل نصاً للإذاعة:")
-        return
-    body = f"📢 <b>إشعار عام من الإدارة:</b>\n\n{esc(txt(message))}"
-    await state.clear()
-    async with get_db() as db:
-        cur = await db.execute("SELECT user_id FROM users WHERE is_banned = 0")
-        users = await cur.fetchall()
-
-    await message.reply(f"⏳ جارٍ الإرسال إلى {len(users)} مستخدم...")
-    sent = failed = 0
-    for (uid,) in users:
-        for _ in range(2):
-            try:
-                await bot.send_message(uid, body)
-                sent += 1
-                break
-            except TelegramRetryAfter as e:
-                await asyncio.sleep(e.retry_after)
-            except Exception:
-                failed += 1
-                break
-        await asyncio.sleep(0.05)
-    await message.answer(f"✅ اكتملت الإذاعة! تم التسليم: {sent} | فشل: {failed}")
-
-
-@dp.callback_query(F.data == "adm:close")
-async def adm_close(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        return
-    try:
-        await cb.message.delete()
-    except Exception:
-        pass
-
-
-# =====================================================================
-# 21. خطوط الأمان (Fallback) — يجب أن تبقى في آخر الملف
-# =====================================================================
-@dp.message(StateFilter(None), F.chat.type == "private")
-async def no_state_fallback(message: types.Message):
-    """رسالة بلا حالة (مثلاً ضاعت الجلسة): نتعرف على آخر طلب معلق ونوجّه الزبون."""
-    pending = await WalletService.last_pending_order(message.from_user.id)
-    if pending:
-        text = (
-            f"ℹ️ لديك طلب قيد التنفيذ:\n🆔 <code>{pending[0]}</code>\n📦 {esc(pending[1])}\n"
-            f"💵 {pending[2]:,} ل.س\n\nإذا أردت التواصل بخصوصه اضغط «الدعم والشكاوى»."
-        )
-        kb = KB([[B("🛠 الدعم والشكاوى", "sec:support")], [B("🏠 الرئيسية", "back_home")]])
-    else:
-        text = "👋 لا يوجد إجراء نشط حالياً. اختر من القائمة الرئيسية:"
-        kb = HOME_KB
-    await message.answer(text, reply_markup=kb)
-
-
-@dp.callback_query()
-async def stale_callback_fallback(cb: types.CallbackQuery, state: FSMContext):
-    """زر قديم أو انتهت جلسته."""
-    if cb.message and cb.message.chat.type != "private":
-        return
-    await state.clear()
-    await safe_edit(cb, "⚠️ انتهت صلاحية هذه الخطوة. يرجى البدء من جديد:", HOME_KB)
-
-
-# =====================================================================
-# 22. الإقلاع
-# =====================================================================
-async def main():
-    await init_db()
-    await bot.delete_webhook(drop_pending_updates=False)
-    log.info("🚀 Syria Store Wallet-First System is running...")
-    try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-    finally:
-        await bot.session.close()
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        log.info("Bot stopped.")
+    notes = f"\n\n📌 <b>ملاحظات هامة:</b>\n{esc(acc['notes'])}" if acc.get("notes") else ""
+    await safe_edit(cb, f"{acc['emoji']} <b>{esc(acc['name'])}</b>\nاختر الباقة:{notes}", KB(rows))
+
+
+@dp.callback_query(F.data.startswith("ab:"))
+async def account_buy(cb: types.CallbackQuery, state: FSMContext):
+    _, key, idx = cb.data.split(":")
+    acc = ACCOUNTS_CATALOG[key]
+    label, usd = acc["packs"][int(idx)]
+    price = await sell_price(cost_usd=usd, section="accounts")  
