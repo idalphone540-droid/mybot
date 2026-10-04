@@ -1,6 +1,26 @@
+name: Run Telegram Bot
 
-- name: Run Bot
+on:
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Bot
         run: python bot.py
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           FORCE_CHANNEL: "-1004492385043"
+          DOLLAR_RATE: "150"
+          DEFAULT_MARGIN: "25"
