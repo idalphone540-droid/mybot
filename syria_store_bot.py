@@ -801,7 +801,8 @@ async def update_setting(key: str, val: float):
         )
 
 
-ENV_CONFIG = {"force_channel": os.getenv("FORCE_CHANNEL", "").strip(), "force_link": os.getenv("FORCE_LINK", "").strip()}
+ENV_CONFIG = {"force_channel": "-1003772883011", "force_link": "https://t.me/Syriansto"}
+
 
 
 async def get_config(key: str, default: str = "") -> str:
