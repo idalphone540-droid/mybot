@@ -23,5 +23,5 @@ jobs:
 
       - name: Run bot script
         env:
-          BOT_TOKEN: "8774564171:AAFJD4FersBnIbU3n_gq6MikF3W8zRu0x54"
+          BOT_TOKEN: "8774564171:AAEzd9RFBb2zJZ06R9speB6nZ7mF9Omd_mI"
         run: python syria_store_bot.py
