@@ -9,6 +9,8 @@ aiogram 3.x + aiosqlite
     python syria_store_bot.py
 """
 import asyncio
+import difflib
+import gzip
 import html
 import json
 import logging
@@ -16,7 +18,10 @@ import math
 import os
 import random
 import re
+import shutil
+import sqlite3
 import string
+import tempfile
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional, Tuple
@@ -30,7 +35,7 @@ from aiogram.exceptions import (
     TelegramForbiddenError,
     TelegramRetryAfter,
 )
-from aiogram.filters import Command, CommandStart, StateFilter
+from aiogram.filters import Command, CommandObject, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.base import BaseStorage, StateType, StorageKey
@@ -55,17 +60,27 @@ GROUPS = {
     "wallet": -1003984372814,
     "balance": -1003745247353,
     "games": -1004426615112,
-    "accounts": -1003985654158,
+    # الحسابات تذهب لمجموعة الأرقام والسوشيال. لفصلها لاحقاً ضع آيدي مجموعة جديدة في ACCOUNTS_ADMIN_GROUP
+    "accounts": int(os.getenv("ACCOUNTS_ADMIN_GROUP", "0") or 0) or -1004411774893,
     "social": -1004411774893,
     "support": -1004420804667,
+    # مجموعة مراجعة مكافآت الإحالة: ضع آيديها في REFERRAL_ADMIN_GROUP (وإلا تُرسل لمجموعة الإيداعات)
+    "referral": int(os.getenv("REFERRAL_ADMIN_GROUP", "0") or 0) or -1003985654158,
 }
 ALL_ADMIN_GROUPS = list(GROUPS.values())
+DEPOSIT_ADMIN_GROUP = GROUPS["wallet"]
+REFERRAL_ADMIN_GROUP = GROUPS["referral"]
+REFERRAL_TARGET = 5  # عدد الإحالات المكتملة لكل مكافأة
+# نسخة القاعدة الاحتياطية تُرسل إلى هذه المحادثة (اجعلها خاصة، والبوت مشرف فيها)
+BACKUP_CHAT_ID = int(os.getenv("BACKUP_CHAT_ID", "-1004478472616") or 0)
+BACKUP_INTERVAL_MIN = int(os.getenv("BACKUP_INTERVAL_MIN", "60"))
 
 SHAM_NAME = "سكينه حمود طه"
 SHAM_ADDR = "be03739e320f3dfd318a1a7faebae16a"
 QR_IMAGE_PATH = "qr_sham.jpg"
 DB_PATH = os.getenv("DB_PATH", "syria_store_v2.db")
 DEFAULT_MARGIN = float(os.getenv("DEFAULT_MARGIN", "25"))
+BALANCE_DEFAULT_MARGIN = float(os.getenv("DEFAULT_MARGIN_BALANCE", "15"))
 DEFAULT_DOLLAR_RATE = float(os.getenv("DOLLAR_RATE", "150"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -91,20 +106,23 @@ GOVERNORATES = [
     "إدلب", "جبلة", "القلمون",
 ]
 
+# أسعار التكلفة عليك (بالليرة). سعر البيع = التكلفة × (1 + نسبة ربح الرصيد) من /admin
 SYR_UNITS = [
-    (9.61, 12), (20.19, 25), (30.76, 40), (40.38, 50), (52.88, 65),
-    (62.50, 75), (77.88, 95), (81.73, 100), (100.96, 125), (125, 150),
-    (160.57, 200), (192.3, 240), (211.53, 265), (240.38, 300), (288.46, 360),
-    (317.3, 400), (370.19, 450), (432.69, 530), (480.76, 600), (576.92, 720),
-    (625, 780), (721.15, 895), (769.23, 950), (951.92, 1180), (1057.69, 1300),
-    (1923.07, 2380), (2403.84, 3000), (3846.15, 4770),
+    (9.61, 10.27), (20.19, 21.58), (23.07, 24.65), (24.03, 25.68), (25.96, 27.74),
+    (30.76, 32.88), (40.38, 43.16), (45.19, 48.30), (48.07, 51.38), (52.88, 56.52),
+    (62.50, 66.80), (68.26, 72.96), (72.11, 77.07), (77.88, 83.24), (81.73, 87.35),
+    (86.53, 92.49), (96.15, 102.77), (100.96, 107.92), (105.76, 113.04), (115.38, 123.33),
+    (125.00, 133.61), (130.76, 139.76), (144.23, 154.17), (160.57, 171.63), (163.46, 174.72),
+    (173.07, 184.99), (183.65, 196.30), (192.30, 205.55), (211.53, 226.10), (240.38, 256.93),
+    (288.46, 308.32), (317.30, 339.16), (370.19, 395.69), (432.69, 462.49), (480.76, 513.87),
+    (576.92, 616.66), (625.00, 668.04), (721.15, 770.82), (769.23, 822.19), (951.92, 1017.48),
 ]
 
 MTN_UNITS = [
-    (10, 12), (12, 15), (15, 20), (20, 25), (25, 30), (30, 40), (35, 45),
-    (40, 50), (50, 60), (60, 75), (85, 105), (100, 125), (170, 210), (200, 250),
-    (280, 350), (360, 450), (400, 500), (600, 750), (750, 930), (1000, 1250),
-    (1500, 1860), (2000, 2500), (2500, 3010), (3000, 3750), (5000, 6200),
+    (10, 10.69), (20, 21.38), (25, 26.72), (30, 32.07), (35, 37.41), (40, 42.75),
+    (50, 53.44), (60, 64.14), (70, 74.82), (85, 90.85), (170, 181.71), (200, 213.78),
+    (280, 299.28), (360, 384.79), (400, 427.55), (500, 534.44), (600, 641.32),
+    (750, 801.66), (1000, 1068.87), (1500, 1603.31),
 ]
 
 STATION_VALS = [
@@ -715,6 +733,57 @@ async def write_tx():
             raise
 
 
+async def seed_catalog(db):
+    """ينقل الكتالوج المكتوب في الملف إلى القاعدة مرة واحدة فقط (إن كانت الجداول فارغة)."""
+    cur = await db.execute("SELECT COUNT(*) FROM catalog_services")
+    if (await cur.fetchone())[0] > 0:
+        return
+    await db.execute("BEGIN IMMEDIATE;")
+    try:
+        async def add_service(section, name, emoji, ask, notes="", kind="packs", platform="", mn=0, mp=0.0, up=0.0, tm=0, tu=0.0):
+            c = await db.execute(
+                "INSERT INTO catalog_services (section, platform, name, emoji, ask, notes, kind, min_qty, min_price, unit_price, tok_min, tok_unit) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (section, platform, name, emoji, ask, notes, kind, mn, mp, up, tm, tu),
+            )
+            return c.lastrowid
+
+        async def add_packs(sid, packs):
+            await db.executemany(
+                "INSERT INTO catalog_packs (service_id, label, price, cur) VALUES (?, ?, ?, 'USD')",
+                [(sid, label, price) for label, price in packs],
+            )
+
+        for g in GAMES_CATALOG.values():
+            tk = g.get("tokens") or {}
+            sid = await add_service("games", g["name"], g["emoji"], g["ask"], tm=tk.get("min", 0), tu=tk.get("unit_syp", 0.0))
+            await add_packs(sid, g["packs"])
+        for it in CHAT_ITEMS:
+            if it["kind"] == "qty":
+                await add_service("chat", it["name"], "💬", "أرسل آيدي اللاعب:", kind="qty",
+                                  mn=it["min"], mp=it["min_price"], up=it["unit"])
+            else:
+                sid = await add_service("chat", it["name"], "💬", "أرسل آيدي اللاعب:")
+                await add_packs(sid, it["packs"])
+        for a in ACCOUNTS_CATALOG.values():
+            sid = await add_service("accounts", a["name"], a["emoji"], a["ask"], notes=a.get("notes", ""))
+            await add_packs(sid, a["packs"])
+        for sv in SOCIAL_SERVICES.values():
+            sid = await add_service("social", sv["name"], SOCIAL_PLATFORMS[sv["plat"]][0], sv["ask"], platform=sv["plat"])
+            await add_packs(sid, sv["packs"])
+        for n in NUMBERS_CATALOG.values():
+            sid = await add_service("numbers", n["name"], n["emoji"], n["ask"])
+            await add_packs(sid, [("رقم", n["usd"])])
+        await db.execute("COMMIT;")
+        log.info("catalog seeded from file constants")
+    except BaseException:
+        try:
+            await db.execute("ROLLBACK;")
+        except Exception:
+            pass
+        raise
+
+
 async def init_db():
     async with get_db() as db:
         await db.execute("PRAGMA journal_mode = WAL;")
@@ -776,8 +845,64 @@ async def init_db():
         await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_ledger_user ON wallet_ledger(user_id);")
         await db.execute("CREATE TABLE IF NOT EXISTS bot_config (key TEXT PRIMARY KEY, value TEXT);")
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS catalog_services (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            section TEXT NOT NULL,
+            platform TEXT DEFAULT '',
+            name TEXT NOT NULL,
+            emoji TEXT DEFAULT '',
+            ask TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            kind TEXT NOT NULL DEFAULT 'packs' CHECK(kind IN ('packs', 'qty')),
+            min_qty INTEGER DEFAULT 0,
+            min_price REAL DEFAULT 0,
+            unit_price REAL DEFAULT 0,
+            tok_min INTEGER DEFAULT 0,
+            tok_unit REAL DEFAULT 0,
+            is_hidden INTEGER DEFAULT 0
+        );""")
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS catalog_packs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            service_id INTEGER NOT NULL REFERENCES catalog_services(id) ON DELETE CASCADE,
+            label TEXT NOT NULL,
+            price REAL NOT NULL CHECK(price > 0),
+            cur TEXT NOT NULL DEFAULT 'USD' CHECK(cur IN ('USD', 'SYP')),
+            is_hidden INTEGER DEFAULT 0
+        );""")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_cat_services_section ON catalog_services(section, is_hidden);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_cat_packs_service ON catalog_packs(service_id, is_hidden);")
+        # ترحيل: أعمدة الإحالة في جدول المستخدمين
+        cur = await db.execute("PRAGMA table_info(users)")
+        ucols = {r[1] for r in await cur.fetchall()}
+        if "referred_by" not in ucols:
+            await db.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
+        if "ref_enrolled" not in ucols:
+            await db.execute("ALTER TABLE users ADD COLUMN ref_enrolled INTEGER DEFAULT 0")
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS referrals (
+            referred_id INTEGER PRIMARY KEY,
+            referrer_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PENDING' CHECK(status IN ('PENDING', 'COMPLETED')),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP
+        );""")
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS referral_rewards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            referrer_id INTEGER NOT NULL,
+            batch_no INTEGER NOT NULL,
+            amount INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'PENDING' CHECK(status IN ('PENDING', 'PAID', 'REJECTED')),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            decided_at TIMESTAMP,
+            UNIQUE(referrer_id, batch_no)
+        );""")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id, status);")
+        await seed_catalog(db)
 
-        for k, v in (("dollar_rate", DEFAULT_DOLLAR_RATE), ("num_whatsapp", 400.0), ("num_telegram", 300.0), ("margin_games", DEFAULT_MARGIN), ("margin_chat", DEFAULT_MARGIN), ("margin_accounts", DEFAULT_MARGIN), ("margin_social", DEFAULT_MARGIN), ("margin_numbers", DEFAULT_MARGIN)):
+        for k, v in (("dollar_rate", DEFAULT_DOLLAR_RATE), ("num_whatsapp", 400.0), ("num_telegram", 300.0), ("margin_games", DEFAULT_MARGIN), ("margin_chat", DEFAULT_MARGIN), ("margin_accounts", DEFAULT_MARGIN), ("margin_social", DEFAULT_MARGIN), ("margin_numbers", DEFAULT_MARGIN), ("margin_balance", BALANCE_DEFAULT_MARGIN), ("margin_station", 7.0), ("margin_invoice", 5.0), ("margin_cash", 5.0), ("referral_reward", 0.0), ("referral_percent", 0.0)):
             await db.execute("INSERT OR IGNORE INTO settings (key, val) VALUES (?, ?);", (k, v))
         await db.execute(
             "INSERT INTO users (user_id, username, full_name, role) VALUES (?, 'Admin', 'Admin', 'ADMIN') "
@@ -801,8 +926,7 @@ async def update_setting(key: str, val: float):
         )
 
 
-ENV_CONFIG = {"force_channel": "-1003772883011", "force_link": "https://t.me/Syriansto"}
-
+ENV_CONFIG = {"force_channel": os.getenv("FORCE_CHANNEL", "").strip(), "force_link": os.getenv("FORCE_LINK", "").strip()}
 
 
 async def get_config(key: str, default: str = "") -> str:
@@ -1124,6 +1248,13 @@ class AdminActions(StatesGroup):
     find_user = State()
     msg_user = State()
     set_channel = State()
+    cat_edit = State()
+    cat_pack_add = State()
+    cat_new_name = State()
+    cat_new_ask = State()
+    cat_new_qty = State()
+    set_reward = State()
+    set_reward_pct = State()
     broadcast_msg = State()
 
 
@@ -1163,8 +1294,15 @@ def txt(m: types.Message) -> str:
     return (m.text or "").strip()
 
 
+AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+
+
+def normalize_digits(s: str) -> str:
+    return (s or "").translate(AR_DIGITS)
+
+
 def to_int(s: str) -> Optional[int]:
-    s = s.replace(",", "").replace("٬", "").strip()
+    s = normalize_digits(s).replace(",", "").replace("٬", "").strip()
     return int(s) if s.isdigit() else None
 
 
@@ -1246,10 +1384,12 @@ def persistent_keyboard():
 def main_dashboard_kb():
     return KB([
         [B("➕ شحن رصيد المحفظة (شام كاش)", "wallet:topup")],
+        [B("🔍 بحث عن خدمة", "cse:all")],
         [B("📞 الرصيد والكاش", "sec:balance"), B("🎮 شحن الألعاب", "sec:games")],
         [B("💬 برامج الشات", "sec:chat"), B("📦 الحسابات الرقمية", "sec:accounts")],
         [B("🚀 سوشيال ميديا", "sec:social"), B("📱 أرقام التفعيل", "sec:numbers")],
-        [B("💳 كشف المحفظة", "client:wallet_info"), B("🛠 الدعم والشكاوى", "sec:support")],
+        [B("📦 طلباتي", "client:orders"), B("💳 كشف المحفظة", "client:wallet_info")],
+        [B("🎁 شارك واربح", "ref:home"), B("🛠 الدعم والشكاوى", "sec:support")],
     ])
 
 
@@ -1418,6 +1558,19 @@ async def global_error_handler(event: ErrorEvent):
 # =====================================================================
 # 9. البداية والرئيسية + أوامر المدير (مسجلة مبكراً لتسبق حالات FSM)
 # =====================================================================
+@dp.message(CommandStart(deep_link=True), F.chat.type == "private")
+async def start_deeplink(message: types.Message, command: CommandObject, state: FSMContext):
+    arg = command.args or ""
+    if arg.startswith("ref_"):
+        rid = to_int(arg[4:])
+        if rid:
+            try:
+                await register_referral(message.from_user.id, rid)
+            except Exception as e:
+                log.warning("register_referral failed: %s", e)
+    await start_handler(message, state)
+
+
 @dp.message(CommandStart(), F.chat.type == "private")
 @dp.message(F.text == "🏠 الرئيسية", F.chat.type == "private")
 async def start_handler(message: types.Message, state: FSMContext):
@@ -1460,11 +1613,12 @@ async def admin_kb():
     return KB([
         [B("📊 الإحصائيات", "adm:stats")],
         [B(f"📋 الطلبات المعلقة ({o})", "adm:pend"), B(f"💳 الإيداعات المعلقة ({p})", "adm:payp")],
+        [B("🗂 إدارة الخدمات", "adm:cat"), B("🎁 الإحالة", "adm:ref")],
         [B("👤 إدارة مستخدم", "adm:user")],
         [B("➕ تغذية رصيد", "adm:add_bal"), B("➖ سحب رصيد", "adm:sub_bal")],
         [B("💱 سعر الدولار", "adm:set_rate"), B("📈 نسب الربح", "adm:margin")],
         [B("📣 الاشتراك الإجباري", "adm:fsub"), B("🛠 وضع الصيانة", "adm:maint")],
-        [B("📢 إذاعة جماعية", "adm:broadcast")],
+        [B("📢 إذاعة جماعية", "adm:broadcast"), B("💾 نسخة احتياطية", "adm:backup")],
         [B("❌ إغلاق اللوحة", "adm:close")],
     ])
 
@@ -1545,35 +1699,25 @@ async def wallet_info_view(cb: types.CallbackQuery):
 @dp.callback_query(F.data == "wallet:topup")
 async def wallet_topup_start(cb: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await state.set_state(WalletFlow.amount)
-    await safe_edit(
-        cb,
-        "💵 <b>شحن المحفظة الإلكترونية:</b>\n\n"
-        f"أدخل المبلغ الذي ترغب بإيداعه بالليرة السورية (أقل مبلغ {MIN_TOPUP:,} ل.س):",
-        cancel_kb(),
-    )
-
-
-@dp.message(WalletFlow.amount)
-async def wallet_amt_rec(message: types.Message, state: FSMContext):
-    amt = to_int(txt(message))
-    if amt is None or amt < MIN_TOPUP:
-        await message.reply(f"⚠️ يرجى إدخال مبلغ صحيح بالأرقام (الحد الأدنى {MIN_TOPUP:,} ل.س):")
-        return
-    await state.update_data(dep_amt=amt)
     await state.set_state(WalletFlow.tx_code)
     pay_text = (
-        f"🧾 <b>طلب شحن رصيد بقيمة: {amt:,} ل.س</b>\n"
+        f"💵 <b>شحن المحفظة عبر شام كاش</b>\n"
         f"────────────────────────────\n"
         f"👤 الاسم: <code>{esc(SHAM_NAME)}</code>\n"
         f"🔗 العنوان: <code>{esc(SHAM_ADDR)}</code>\n"
         f"────────────────────────────\n"
-        f"⚠️ قم بالتحويل عبر شام كاش، ثم <b>أرسل رقم العملية (Transaction ID) هنا</b>:"
+        f"1️⃣ حوّل المبلغ عبر شام كاش إلى الحساب أعلاه.\n"
+        f"2️⃣ أرسل هنا <b>رقم العملية (Transaction ID)</b> — أرقام فقط:"
     )
     if os.path.exists(QR_IMAGE_PATH):
-        await message.answer_photo(FSInputFile(QR_IMAGE_PATH), caption=pay_text, reply_markup=cancel_kb())
+        try:
+            if isinstance(cb.message, types.Message):
+                await cb.message.delete()
+        except Exception:
+            pass
+        await bot.send_photo(cb.from_user.id, FSInputFile(QR_IMAGE_PATH), caption=pay_text, reply_markup=cancel_kb())
     else:
-        await message.answer(pay_text, reply_markup=cancel_kb())
+        await safe_edit(cb, pay_text, cancel_kb())
 
 
 async def tx_exists(tx_code: str) -> bool:
@@ -1584,40 +1728,44 @@ async def tx_exists(tx_code: str) -> bool:
 
 @dp.message(WalletFlow.tx_code)
 async def wallet_tx_rec(message: types.Message, state: FSMContext):
-    tx_code = re.sub(r"\s+", "", txt(message)).upper()
-    if len(tx_code) < 3 or len(tx_code) > 64:
-        await message.reply("⚠️ يرجى إدخال رقم عملية صحيح:")
+    tx_code = re.sub(r"[\s\-_.,]", "", normalize_digits(txt(message)))
+    if not tx_code.isdigit() or not (4 <= len(tx_code) <= 30):
+        await message.reply("⚠️ رقم العملية يجب أن يتكون من أرقام فقط (من 4 إلى 30 رقماً). أعد إرساله:")
         return
     if await tx_exists(tx_code):
         await message.reply("⛔ رقم العملية هذا مستخدم مسبقاً! يرجى إدخال رقم صحيح:")
         return
     await state.update_data(sham_tx=tx_code)
-    await state.set_state(WalletFlow.receipt)
-    await message.answer("📸 الآن أرسل صورة إشعار التحويل لتأكيد الشحن:", reply_markup=cancel_kb())
+    await state.set_state(WalletFlow.amount)
+    await message.answer(
+        f"💰 الآن أرسل <b>المبلغ المحوَّل</b> بالليرة السورية (أقل مبلغ {MIN_TOPUP:,} ل.س):",
+        reply_markup=cancel_kb(),
+    )
 
 
-@dp.message(WalletFlow.receipt, F.photo)
-async def wallet_receipt_rec(message: types.Message, state: FSMContext):
+@dp.message(WalletFlow.amount)
+async def wallet_amt_rec(message: types.Message, state: FSMContext):
+    amt = to_int(txt(message))
+    if amt is None or amt < MIN_TOPUP or amt > 1_000_000_000:
+        await message.reply(f"⚠️ يرجى إدخال مبلغ صحيح بالأرقام (الحد الأدنى {MIN_TOPUP:,} ل.س):")
+        return
     data = await state.get_data()
-    amt = int(data.get("dep_amt", 0))
     tx_code = data.get("sham_tx", "")
-    if amt <= 0 or not tx_code:
+    if not tx_code:
         await state.clear()
         await message.answer("⚠️ انتهت جلسة الشحن، يرجى البدء من جديد.", reply_markup=KB([[B("➕ شحن المحفظة", "wallet:topup")]]))
         return
 
     pay_id = generate_uid("PAY")
-    file_id = message.photo[-1].file_id
     try:
         async with get_db() as db:
             await db.execute(
-                "INSERT INTO payments (payment_id, user_id, method, amount, sham_tx_id, receipt_file_id) "
-                "VALUES (?, ?, 'SHAM_CASH', ?, ?, ?)",
-                (pay_id, message.from_user.id, amt, tx_code, file_id),
+                "INSERT INTO payments (payment_id, user_id, method, amount, sham_tx_id) VALUES (?, ?, 'SHAM_CASH', ?, ?)",
+                (pay_id, message.from_user.id, amt, tx_code),
             )
     except aiosqlite.IntegrityError:
         await state.set_state(WalletFlow.tx_code)
-        await message.reply("⛔ رقم العملية هذا مستخدم مسبقاً! أرسل رقم عملية صحيح:")
+        await message.reply("⛔ رقم العملية هذا مستخدم مسبقاً! أرسل رقم عملية صحيحاً:")
         return
 
     text_to_group = (
@@ -1625,21 +1773,52 @@ async def wallet_receipt_rec(message: types.Message, state: FSMContext):
         f"🆔 رقم الدفعة: <code>{pay_id}</code>\n"
         f"👤 الزبون: {user_tag(message.from_user)} (<code>{message.from_user.id}</code>)\n"
         f"🔑 UID: <code>{message.from_user.id}</code>\n"
-        f"💰 المبلغ المطلوب: <b>{amt:,} ل.س</b>\n"
+        f"💰 المبلغ المحوَّل: <b>{amt:,} ل.س</b>\n"
         f"🧾 رقم العملية: <code>{esc(tx_code)}</code>\n"
     )
-    kb = KB([[B("✅ قبول وتغذية الرصيد", f"adm_pay:ok:{pay_id}"), B("❌ رفض الإيداع", f"adm_pay:no:{pay_id}")]])
-    await send_to_staff(GROUPS["wallet"], text_to_group, kb, photo=file_id)
+    kb = KB([[B("✅ تأكيد وإيداع", f"adm_pay:ok:{pay_id}"), B("❌ رفض", f"adm_pay:no:{pay_id}")]])
+    await send_to_staff(DEPOSIT_ADMIN_GROUP, text_to_group, kb)
     await state.clear()
     await message.answer(
-        "✅ تم إرسال إشعار الإيداع للإدارة بنجاح! سيتم إشعارك وشحن محفظتك فوراً بعد التأكيد.",
+        "✅ تم إرسال طلب الإيداع للإدارة، وسيُضاف الرصيد لمحفظتك فور التأكيد وسيصلك إشعار.",
         reply_markup=HOME_KB,
     )
 
 
 @dp.message(WalletFlow.receipt)
-async def wallet_receipt_not_photo(message: types.Message):
-    await message.reply("⚠️ يرجى إرسال صورة إشعار التحويل (كصورة وليس كنص).")
+async def wallet_old_receipt_state(message: types.Message, state: FSMContext):
+    """حالة قديمة (كانت تنتظر صورة): نُنهيها ونوجّه الزبون للطريقة الجديدة."""
+    await state.clear()
+    await message.answer("ℹ️ صار الشحن بالنص فقط (رقم العملية ثم المبلغ). ابدأ من جديد:",
+                         reply_markup=KB([[B("➕ شحن المحفظة", "wallet:topup")]]))
+
+
+ORDER_STATUS_LABEL = {
+    "PROCESSING": "⏳ قيد المعالجة", "COMPLETED": "✅ تم التنفيذ",
+    "REFUNDED": "❌ ملغي", "REJECTED": "❌ ملغي",
+}
+
+
+@dp.callback_query(F.data == "client:orders")
+async def my_orders(cb: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT order_id, service_name, price, status, created_at FROM orders WHERE user_id = ? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 20", (cb.from_user.id,)
+        )
+        rows = await cur.fetchall()
+    if not rows:
+        await safe_edit(cb, "📦 لا توجد طلبات بعد.", HOME_KB)
+        return
+    lines = ["📦 <b>آخر طلباتك</b> (حتى 20):", "────────────────────────────"]
+    for oid, name, price, status, created in rows:
+        lines.append(f"{ORDER_STATUS_LABEL.get(status, status)} — {esc(name)} — <b>{price:,}</b> ل.س\n"
+                     f"<code>{oid}</code> · {str(created)[:16]}")
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3990] + "…"
+    await safe_edit(cb, text, KB([[B("🔄 تحديث", "client:orders")], [B("🏠 الرئيسية", "back_home")]]))
 
 
 # =====================================================================
@@ -1648,7 +1827,8 @@ async def wallet_receipt_not_photo(message: types.Message):
 _recent_purchases: Dict[Tuple[int, str, str], float] = {}
 
 
-async def process_wallet_purchase(event, user_id: int, dept: str, service: str, target: str, price: int, state: FSMContext):
+async def process_wallet_purchase(event, user_id: int, dept: str, service: str, target: str, price: int, state: FSMContext,
+                                  copy_value: Optional[str] = None):
     await state.clear()
 
     # حماية من الضغط المزدوج السريع
@@ -1698,14 +1878,15 @@ async def process_wallet_purchase(event, user_id: int, dept: str, service: str, 
         f"🔑 UID: <code>{user_id}</code>\n"
         f"📦 الخدمة: <b>{esc(service)}</b>\n"
         f"🎯 البيانات: <code>{esc(target)}</code>\n"
-        f"💰 المبلغ المخصوم: <b>{price:,} ل.س</b>\n\n"
-        f"💡 للرد على الزبون، قم بعمل رد (Reply) مباشر على هذه الرسالة."
+        f"💰 المبلغ المخصوم: <b>{price:,} ل.س</b>\n"
+        + (f"📋 للنسخ: <code>{esc(copy_value)}</code>\n" if copy_value else "")
+        + f"\n💡 للرد على الزبون، قم بعمل رد (Reply) مباشر على هذه الرسالة."
     )
     kb_group = KB([[B("✅ تم التنفيذ", f"ord_act:done:{ord_id}"), B("❌ إلغاء واسترجاع", f"ord_act:ref:{ord_id}")]])
     await send_to_staff(group_id, group_card, kb_group)
 
     success_card = (
-        f"🎉 <b>تم شراء الخدمة بنجاح!</b>\n"
+        f"⏳ <b>طلبك قيد المعالجة</b>\n"
         f"────────────────────────────\n"
         f"🆔 رقم الطلب: <code>{ord_id}</code>\n"
         f"📦 الخدمة: <b>{esc(service)}</b>\n"
@@ -1713,7 +1894,8 @@ async def process_wallet_purchase(event, user_id: int, dept: str, service: str, 
         f"💵 المبلغ المخصوم: <b>{price:,} ل.س</b>\n"
         f"💰 رصيدك المتبقي: <b>{balance:,} ل.س</b>\n"
         f"────────────────────────────\n"
-        f"⏳ تم تحويل طلبك لفريق التنفيذ فوراً وسيصلك إشعار بالانتهاء."
+        f"✅ تم الخصم من محفظتك وتحويل الطلب لفريق التنفيذ، وسيصلك إشعار فور الانتهاء.\n"
+        f"📦 تابع حالته من «طلباتي» في القائمة الرئيسية."
     )
     await respond(event, success_card, HOME_KB)
 
@@ -1757,11 +1939,17 @@ async def handle_balance_options(cb: types.CallbackQuery, state: FSMContext):
 
     if opt == "units":
         items = SYR_UNITS if net == "syr" else MTN_UNITS
-        buttons = [B(f"{u} ⬅ {p:,} ل.س", f"bu_{net}_{i}") for i, (u, p) in enumerate(items)]
+        buttons = []
+        for i, (u, cost) in enumerate(items):
+            price = await sell_price(cost_syp=cost, section="balance")
+            buttons.append(B(f"{u:g} ⬅ {price:,} ل.س", f"bu_{net}_{i}"))
         rows = rows_of(buttons, 2) + [[B("🔙 رجوع", f"net:{net}")]]
         await safe_edit(cb, f"📲 <b>اختر فئة وحدات {name}:</b>", KB(rows))
     elif opt == "station":
-        buttons = [B(f"فئة {a:,} ⬅ {p:,} ل.س", f"bs_{net}_{i}") for i, (a, p) in enumerate(STATION_VALS)]
+        buttons = []
+        for i, (a, _old) in enumerate(STATION_VALS):
+            price = await sell_price(cost_syp=a, section="station")
+            buttons.append(B(f"فئة {a:,} ⬅ {price:,} ل.س", f"bs_{net}_{i}"))
         rows = rows_of(buttons, 2) + [[B("🔙 رجوع", f"net:{net}")]]
         await safe_edit(cb, f"⛽ <b>اختر فئة كازية {name}:</b>", KB(rows))
     elif opt == "invoice":
@@ -1776,48 +1964,80 @@ async def handle_balance_options(cb: types.CallbackQuery, state: FSMContext):
 async def sel_units_pack(cb: types.CallbackQuery, state: FSMContext):
     _, net, idx = cb.data.split("_")
     items = SYR_UNITS if net == "syr" else MTN_UNITS
-    u, p = items[int(idx)]
+    u, cost = items[int(idx)]
+    p = await sell_price(cost_syp=cost, section="balance")  # السعر من الخادم دائماً
     name = net_name_of(net)
-    await state.update_data(s_title=f"وحدات {name} ({u} وحدة)", s_price=int(p))
+    await state.update_data(s_title=f"وحدات {name} ({u:g} وحدة)", s_price=int(p))
     await state.set_state(BalanceState.syr_units_phone if net == "syr" else BalanceState.mtn_units_phone)
     await safe_edit(
         cb,
-        f"📲 اخترت فئة <b>{u} وحدة</b> ({p:,} ل.س)\n\nأدخل رقم الهاتف المطلوب التحويل إليه (10 خانات تبدأ بـ 09):",
+        f"📲 اخترت فئة <b>{u:g} وحدة</b> ({p:,} ل.س)\n\n{LINE_PROMPT}",
         cancel_kb(f"bopt:{net}:units"),
     )
 
 
-def valid_phone(p: str) -> bool:
-    return p.isdigit() and len(p) == 10 and p.startswith("09")
+LINE_PROMPT = "📞 أرسل رقم الهاتف أو كود الخط المراد التحويل إليه:"
+NET_PREFIXES = {"syr": ("093", "098", "099"), "mtn": ("094", "095", "096")}
 
 
-async def _units_phone(message: types.Message, state: FSMContext, label: str):
-    p = txt(message)
-    if not valid_phone(p):
-        await message.reply(f"⚠️ رقم {label} يجب أن يتكون من 10 خانات ويبدأ بـ 09:")
+def parse_line_input(raw: str, net: str) -> Tuple[Optional[str], str]:
+    """فحص ذكي: يرجع (النوع، القيمة) حيث النوع phone أو code، أو (None، رسالة الخطأ)."""
+    s = normalize_digits(raw or "")
+    s = re.sub(r"[\s\-\.\(\)]", "", s)
+    for pre in ("+963", "00963"):
+        if s.startswith(pre):
+            rest = s[len(pre):]
+            if rest.startswith("0") and len(rest) == 10:
+                rest = rest[1:]
+            s = "0" + rest
+            break
+    if not s.isdigit():
+        return None, "⚠️ أرسل أرقاماً فقط (رقم هاتف أو كود خط):"
+    name = net_name_of(net)
+    if s.startswith("09"):
+        if len(s) != 10:
+            return None, "⚠️ رقم الهاتف يجب أن يتكون من 10 خانات ويبدأ بـ 09:"
+        if s[:3] not in NET_PREFIXES[net]:
+            return None, f"⚠️ هذا الرقم لا يتبع شبكة {name}. أرسل رقماً صحيحاً:"
+        return "phone", s
+    if not (3 <= len(s) <= 20):
+        return None, "⚠️ كود الخط غير صالح. أرسل رقم الهاتف (09...) أو كود الخط:"
+    return "code", s
+
+
+def line_target(kind: str, value: str, net: str) -> str:
+    return f"{'رقم' if kind == 'phone' else 'كود الخط'} {net_name_of(net)}: {value}"
+
+
+async def _units_phone(message: types.Message, state: FSMContext, net: str):
+    kind, val = parse_line_input(txt(message), net)
+    if kind is None:
+        await message.reply(val)
         return
     data = await state.get_data()
     if "s_title" not in data:
         await state.clear()
         await message.answer("⚠️ انتهت الجلسة، يرجى الاختيار من جديد.", reply_markup=HOME_KB)
         return
-    await process_wallet_purchase(message, message.from_user.id, "balance", data["s_title"], f"رقم {label}: {p}", data["s_price"], state)
+    await process_wallet_purchase(message, message.from_user.id, "balance", data["s_title"],
+                                  line_target(kind, val, net), data["s_price"], state, copy_value=val)
 
 
 @dp.message(BalanceState.syr_units_phone)
 async def proc_syr_phone(message: types.Message, state: FSMContext):
-    await _units_phone(message, state, "سيريتل")
+    await _units_phone(message, state, "syr")
 
 
 @dp.message(BalanceState.mtn_units_phone)
 async def proc_mtn_phone(message: types.Message, state: FSMContext):
-    await _units_phone(message, state, "MTN")
+    await _units_phone(message, state, "mtn")
 
 
 @dp.callback_query(F.data.startswith("bs_"))
 async def sel_station_pack(cb: types.CallbackQuery, state: FSMContext):
     _, net, idx = cb.data.split("_")
-    a, p = STATION_VALS[int(idx)]
+    a, _old = STATION_VALS[int(idx)]
+    p = await sell_price(cost_syp=a, section="station")  # السعر من الخادم دائماً
     name = net_name_of(net)
     await state.update_data(s_title=f"جملة كازية {name} (فئة {a:,})", s_price=int(p))
     await state.set_state(BalanceState.syr_station_code if net == "syr" else BalanceState.mtn_station_code)
@@ -1876,11 +2096,6 @@ async def proc_mtn_st_gov(cb: types.CallbackQuery, state: FSMContext):
     await process_wallet_purchase(cb, cb.from_user.id, "balance", data["s_title"], target, data["s_price"], state)
 
 
-def with_fee(amt: int) -> int:
-    """المبلغ + 5% مع تقريب لأعلى بحساب صحيح (بدون أخطاء الفاصلة العائمة)."""
-    return (amt * 105 + 99) // 100
-
-
 async def _invoice_num(message: types.Message, state: FSMContext, nxt: State):
     if not txt(message):
         await message.reply("⚠️ أدخل رقم الفاتورة كنص:")
@@ -1897,7 +2112,7 @@ async def _invoice_amt(message: types.Message, state: FSMContext, name: str):
         return
     data = await state.get_data()
     target = f"رقم فاتورة {name}: {data.get('inv_num')} | القيمة: {amt:,}"
-    await process_wallet_purchase(message, message.from_user.id, "balance", f"فاتورة {name} ({amt:,} ل.س)", target, with_fee(amt), state)
+    await process_wallet_purchase(message, message.from_user.id, "balance", f"فاتورة {name} ({amt:,} ل.س)", target, await sell_price(cost_syp=amt, section="invoice"), state)
 
 
 @dp.message(BalanceState.syr_invoice_num)
@@ -1925,45 +2140,51 @@ async def _cash_amt(message: types.Message, state: FSMContext, nxt: State, promp
     if not amt or amt < 1000:
         await message.reply("⚠️ الحد الأدنى للكاش هو 1,000 ل.س:")
         return
-    await state.update_data(c_amt=amt, c_price=with_fee(amt))
+    await state.update_data(c_amt=amt, c_price=await sell_price(cost_syp=amt, section="cash"))
     await state.set_state(nxt)
     await message.answer(prompt)
 
 
 @dp.message(BalanceState.syr_cash_amt)
 async def proc_syr_cash_amt(message: types.Message, state: FSMContext):
-    await _cash_amt(message, state, BalanceState.syr_cash_id, "👤 أدخل معرّف Player-ID لاستلام كاش Syriatel:")
+    await _cash_amt(message, state, BalanceState.syr_cash_id, LINE_PROMPT)
 
 
 @dp.message(BalanceState.mtn_cash_amt)
 async def proc_mtn_cash_amt(message: types.Message, state: FSMContext):
-    await _cash_amt(message, state, BalanceState.mtn_cash_num, "📱 أدخل رقم كاش MTN المطلوب التحويل إليه:")
+    await _cash_amt(message, state, BalanceState.mtn_cash_num, LINE_PROMPT)
+
+
+async def _cash_target(message: types.Message, state: FSMContext, net: str):
+    kind, val = parse_line_input(txt(message), net)
+    data = await state.get_data()
+    if kind is None:
+        await message.reply(val)
+        return
+    if "c_amt" not in data:
+        await state.clear()
+        await message.answer("⚠️ انتهت الجلسة، يرجى الاختيار من جديد.", reply_markup=HOME_KB)
+        return
+    name = net_name_of(net)
+    target = f"{line_target(kind, val, net)} | الكمية: {data['c_amt']:,}"
+    await process_wallet_purchase(message, message.from_user.id, "balance", f"كاش {name} ({data['c_amt']:,})",
+                                  target, data["c_price"], state, copy_value=val)
 
 
 @dp.message(BalanceState.syr_cash_id)
 async def proc_syr_cash_id(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    if not txt(message) or "c_amt" not in data:
-        await message.reply("⚠️ أدخل المعرّف كنص:")
-        return
-    target = f"Player-ID: {txt(message)} | الكمية: {data['c_amt']:,}"
-    await process_wallet_purchase(message, message.from_user.id, "balance", f"كاش Syriatel ({data['c_amt']:,})", target, data["c_price"], state)
+    await _cash_target(message, state, "syr")
 
 
 @dp.message(BalanceState.mtn_cash_num)
 async def proc_mtn_cash_num(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    if not txt(message) or "c_amt" not in data:
-        await message.reply("⚠️ أدخل الرقم كنص:")
-        return
-    target = f"رقم كاش MTN: {txt(message)} | الكمية: {data['c_amt']:,}"
-    await process_wallet_purchase(message, message.from_user.id, "balance", f"كاش MTN ({data['c_amt']:,})", target, data["c_price"], state)
+    await _cash_target(message, state, "mtn")
 
 
 # =====================================================================
 # 13. شحن الألعاب
 # =====================================================================
-MARGIN_SECTIONS = {"games": "الألعاب", "chat": "تطبيقات الشات", "accounts": "الحسابات الجاهزة", "social": "السوشيال ميديا", "numbers": "أرقام التفعيل"}  # أقسام أخرى تُضاف هنا لاحقاً
+MARGIN_SECTIONS = {"balance": "الرصيد (وحدات سيريتل/MTN)", "station": "الكازيات (جملة)", "invoice": "الفواتير", "cash": "الكاش", "games": "الألعاب", "chat": "تطبيقات الشات", "accounts": "الحسابات الجاهزة", "social": "السوشيال ميديا", "numbers": "أرقام التفعيل"}  # أقسام أخرى تُضاف هنا لاحقاً
 
 
 async def sell_price(cost_usd: Optional[float] = None, cost_syp: Optional[float] = None, section: str = "games") -> int:
@@ -1973,123 +2194,369 @@ async def sell_price(cost_usd: Optional[float] = None, cost_syp: Optional[float]
     return max(1, math.ceil(round(cost * (1 + margin / 100), 6)))
 
 
-async def show_games_list(cb: types.CallbackQuery, page: int):
-    keys = list(GAMES_CATALOG.keys())
-    total = max(1, (len(keys) + GAMES_PER_PAGE - 1) // GAMES_PER_PAGE)
+# =====================================================================
+# 13. محرك الكتالوج (قاعدة البيانات) — واجهة الزبون
+#   الألعاب، تطبيقات الشات، الحسابات، السوشيال، أرقام التفعيل:
+#   كلها تُقرأ من جداول catalog_services / catalog_packs وتُدار من /admin
+# =====================================================================
+SECTIONS = {
+    "games": {"emoji": "🎮", "label": "الألعاب", "title": "اختر اللعبة المطلوبة", "per_page": 8, "cols": 1,
+              "dept": "games", "quote": ("quote:game", "🎮 باقي الألعاب [طلب تسعير]")},
+    "chat": {"emoji": "💬", "label": "تطبيقات الشات", "title": "اختر تطبيق الشات المطلوب", "per_page": 10, "cols": 2,
+             "dept": "games", "search": True, "quote": ("quote:chat", "🔍 تطبيق غير موجود [طلب تسعير]")},
+    "accounts": {"emoji": "📦", "label": "الحسابات الجاهزة", "title": "اختر الحساب المطلوب", "per_page": 8, "cols": 2,
+                 "dept": "accounts", "quote": ("quote:acc", "📋 حساب غير موجود [طلب تسعير]")},
+    "social": {"emoji": "🚀", "label": "السوشيال ميديا", "title": "اختر منصة السوشيال ميديا", "per_page": 8, "cols": 1,
+               "dept": "social"},
+    "numbers": {"emoji": "📱", "label": "أرقام التفعيل", "title": "قسم أرقام التفعيل", "per_page": 8, "cols": 1,
+                "dept": "social", "quote": ("quote:num_google", "🌐 تفعيل غوغل / خدمة أخرى [طلب تسعير]")},
+}
+
+VISIBLE_COND = ("s.is_hidden=0 AND (s.kind='qty' OR EXISTS "
+                "(SELECT 1 FROM catalog_packs p WHERE p.service_id=s.id AND p.is_hidden=0))")
+
+
+async def fetch_all(sql: str, params: tuple = ()) -> list:
+    async with get_db() as db:
+        cur = await db.execute(sql, params)
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, r)) for r in await cur.fetchall()]
+
+
+async def fetch_one(sql: str, params: tuple = ()):
+    rows = await fetch_all(sql, params)
+    return rows[0] if rows else None
+
+
+async def exec_sql(sql: str, params: tuple = ()) -> Tuple[Optional[int], int]:
+    async with get_db() as db:
+        cur = await db.execute(sql, params)
+        return cur.lastrowid, cur.rowcount
+
+
+async def get_service(sid: int):
+    return await fetch_one("SELECT * FROM catalog_services WHERE id=?", (sid,))
+
+
+def fmt_num(v: float) -> str:
+    return f"{float(v):.8f}".rstrip("0").rstrip(".") or "0"
+
+
+async def visible_services(section: str, platform: Optional[str] = None) -> list:
+    sql = f"SELECT s.* FROM catalog_services s WHERE s.section=? AND {VISIBLE_COND}"
+    params = [section]
+    if platform:
+        sql += " AND s.platform=?"
+        params.append(platform)
+    sql += " ORDER BY " + ("lower(s.name)" if section == "chat" else "s.id")
+    return await fetch_all(sql, tuple(params))
+
+
+async def pack_sell_price(pack: dict, section: str) -> int:
+    if pack["cur"] == "USD":
+        return await sell_price(cost_usd=pack["price"], section=section)
+    return await sell_price(cost_syp=pack["price"], section=section)
+
+
+def qty_cost(svc: dict, qty: int) -> float:
+    """الحد الأدنى بالضبط = السعر الثابت، وما فوقه = الكمية × سعر الوحدة (ولا يقل عن سعر الحد الأدنى)."""
+    if qty == svc["min_qty"]:
+        return svc["min_price"]
+    return max(svc["min_price"], qty * svc["unit_price"])
+
+
+def order_service_name(svc: dict, label: str) -> str:
+    if svc["section"] == "social":
+        plat = SOCIAL_PLATFORMS.get(svc["platform"], ("", ""))[1]
+        return f"{plat} - {svc['name']} ({label})" if plat else f"{svc['name']} ({label})"
+    if svc["section"] == "numbers":
+        return svc["name"]
+    return f"{svc['name']} - {label}"
+
+
+def svc_emoji(svc: dict) -> str:
+    return svc.get("emoji") or SECTIONS.get(svc["section"], {}).get("emoji", "")
+
+
+async def show_section(cb: types.CallbackQuery, section: str, page: int = 0):
+    meta = SECTIONS[section]
+    if section == "social":
+        rows = [[B(f"{emo} خدمات {name}", f"sp:{k}")] for k, (emo, name) in SOCIAL_PLATFORMS.items()]
+        rows.append([B("🔙 العودة للرئيسية", "back_home")])
+        await safe_edit(cb, f"{meta['emoji']} <b>{meta['title']}:</b>", KB(rows))
+        return
+
+    if section == "numbers":
+        items = await fetch_all(
+            "SELECT p.id AS pid, p.label, p.price, p.cur, s.name, s.emoji, "
+            "(SELECT COUNT(*) FROM catalog_packs q WHERE q.service_id=s.id AND q.is_hidden=0) AS n "
+            "FROM catalog_packs p JOIN catalog_services s ON s.id=p.service_id "
+            "WHERE s.section='numbers' AND s.is_hidden=0 AND p.is_hidden=0 ORDER BY s.id, p.id"
+        )
+        rows = []
+        for it in items:
+            price = await pack_sell_price(it, "numbers")
+            title = it["name"] + (f" - {it['label']}" if it["n"] > 1 else "")
+            rows.append([B(f"{it['emoji'] or meta['emoji']} {title} ({price:,} ل.س)", f"pb:{it['pid']}")])
+        if meta.get("quote"):
+            rows.append([B(meta["quote"][1], meta["quote"][0])])
+        rows.append([B("🔙 العودة للرئيسية", "back_home")])
+        await safe_edit(cb, f"{meta['emoji']} <b>{meta['title']}:</b>", KB(rows))
+        return
+
+    services = await visible_services(section)
+    per = meta["per_page"]
+    total = max(1, (len(services) + per - 1) // per)
     page = min(max(page, 0), total - 1)
-    chunk = keys[page * GAMES_PER_PAGE:(page + 1) * GAMES_PER_PAGE]
-    rows = [[B(f"{GAMES_CATALOG[k]['emoji']} {GAMES_CATALOG[k]['name']}", f"gm:{k}:0")] for k in chunk]
-    nav = []
-    if page > 0:
-        nav.append(B("⬅️ السابق", f"gl:{page - 1}"))
-    if page < total - 1:
-        nav.append(B("التالي ➡️", f"gl:{page + 1}"))
-    if nav:
-        rows.append(nav)
-    rows.append([B("🎮 باقي الألعاب [طلب تسعير]", "quote:game")])
-    rows.append([B("🔙 العودة للرئيسية", "back_home")])
-    await safe_edit(cb, f"🎮 <b>اختر اللعبة المطلوبة</b> (صفحة {page + 1} من {total}):", KB(rows))
-
-
-@dp.callback_query(F.data == "sec:games")
-async def games_home(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await show_games_list(cb, 0)
-
-
-@dp.callback_query(F.data.startswith("gl:"))
-async def games_page(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await show_games_list(cb, int(cb.data.split(":")[1]))
-
-
-@dp.callback_query(F.data.startswith("gm:"))
-async def game_packs_view(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    _, g_key, page_s = cb.data.split(":")
-    game = GAMES_CATALOG[g_key]
-    packs = game["packs"]
-    total = max(1, (len(packs) + PACKS_PER_PAGE - 1) // PACKS_PER_PAGE)
-    page = min(max(int(page_s), 0), total - 1)
-    start = page * PACKS_PER_PAGE
+    chunk = services[page * per:(page + 1) * per]
+    buttons = [B(f"{svc_emoji(s)} {s['name']}", f"cv:{s['id']}:{page}:0") for s in chunk]
     rows = []
-    if page == 0 and game.get("tokens"):
-        rows.append([B("🪙 شحن توكنز بالكمية", f"gtok:{g_key}")])
-    for i in range(start, min(start + PACKS_PER_PAGE, len(packs))):
-        label, usd = packs[i]
-        price = await sell_price(cost_usd=usd)
-        rows.append([B(f"{label} ⬅ {price:,} ل.س", f"gb:{g_key}:{i}")])
+    if meta.get("search"):
+        rows.append([B("🔍 بحث عن تطبيق بالاسم", f"cse:{section}")])
+    rows += rows_of(buttons, meta["cols"])
     nav = []
     if page > 0:
-        nav.append(B("⬅️ السابق", f"gm:{g_key}:{page - 1}"))
+        nav.append(B("⬅️ السابق", f"cs:{section}:{page - 1}"))
     if page < total - 1:
-        nav.append(B("التالي ➡️", f"gm:{g_key}:{page + 1}"))
+        nav.append(B("التالي ➡️", f"cs:{section}:{page + 1}"))
     if nav:
         rows.append(nav)
-    rows.append([B("🔙 رجوع للألعاب", "sec:games")])
-    await safe_edit(cb, f"{game['emoji']} <b>{esc(game['name'])}</b>\nاختر الباقة (صفحة {page + 1} من {total}):", KB(rows))
+    if meta.get("quote"):
+        rows.append([B(meta["quote"][1], meta["quote"][0])])
+    rows.append([B("🔙 العودة للرئيسية", "back_home")])
+    head = f"{meta['emoji']} <b>{meta['title']}</b> (صفحة {page + 1} من {total}):"
+    if not services:
+        head = f"{meta['emoji']} لا توجد خدمات متاحة حالياً في هذا القسم."
+    await safe_edit(cb, head, KB(rows))
 
 
-@dp.callback_query(F.data.startswith("gb:"))
-async def buy_game_pack(cb: types.CallbackQuery, state: FSMContext):
-    _, g_key, idx = cb.data.split(":")
-    game = GAMES_CATALOG[g_key]
-    label, usd = game["packs"][int(idx)]
-    price = await sell_price(cost_usd=usd)  # السعر دائماً من الخادم
+@dp.callback_query(F.data.in_({"sec:games", "sec:chat", "sec:accounts", "sec:social", "sec:numbers"}))
+async def section_entry(cb: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await state.update_data(g_dept="games", g_service=f"{game['name']} - {label}", g_price=price)
+    await show_section(cb, cb.data.split(":")[1], 0)
+
+
+@dp.callback_query(F.data.startswith("cs:"))
+async def section_page(cb: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    _, section, page = cb.data.split(":")
+    if section in SECTIONS:
+        await show_section(cb, section, int(page))
+
+
+@dp.callback_query(F.data.startswith("sp:"))
+async def social_platform(cb: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    plat = cb.data.split(":")[1]
+    if plat not in SOCIAL_PLATFORMS:
+        return
+    emo, name = SOCIAL_PLATFORMS[plat]
+    services = await visible_services("social", plat)
+    rows = [[B(s["name"], f"cv:{s['id']}:0:0")] for s in services]
+    rows.append([B("🔙 رجوع", "sec:social")])
+    await safe_edit(cb, f"{emo} <b>خدمات {name}:</b>\nاختر الخدمة:", KB(rows))
+
+
+@dp.callback_query(F.data.startswith("cv:"))
+async def service_view(cb: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    _, sid_s, lp_s, pp_s = cb.data.split(":")
+    svc = await get_service(int(sid_s))
+    if not svc or svc["is_hidden"]:
+        await cb.answer("⚠️ هذه الخدمة غير متاحة حالياً.", show_alert=True)
+        return
+    lp, pp = int(lp_s), int(pp_s)
+    section = svc["section"]
+    back = f"sp:{svc['platform']}" if section == "social" and svc["platform"] in SOCIAL_PLATFORMS else f"cs:{section}:{lp}"
+    notes = f"\n\n📌 <b>ملاحظات هامة:</b>\n{esc(svc['notes'])}" if svc.get("notes") else ""
+
+    if svc["kind"] == "qty":
+        margin = await get_setting(f"margin_{section}")
+        unit_sell = svc["unit_price"] * (1 + margin / 100)
+        price_min = await sell_price(cost_syp=svc["min_price"], section=section)
+        await state.update_data(c_sid=svc["id"])
+        await state.set_state(ChatInput.entering_data)
+        await safe_edit(
+            cb,
+            f"{svc_emoji(svc)} <b>{esc(svc['name'])}</b>\n"
+            f"────────────────────────────\n"
+            f"📉 الحد الأدنى: <b>{svc['min_qty']:,}</b> = <b>{price_min:,} ل.س</b>\n"
+            f"📈 ما فوق الحد الأدنى: <b>{unit_sell:.5f}</b> ل.س للوحدة\n"
+            f"────────────────────────────\n"
+            f"أرسل الآيدي ثم الكمية وبينهما مسافة:\nمثال: <code>123456 {svc['min_qty']}</code>{notes}",
+            cancel_kb(back),
+        )
+        return
+
+    packs = await fetch_all("SELECT * FROM catalog_packs WHERE service_id=? AND is_hidden=0 ORDER BY id", (svc["id"],))
+    per = 8
+    total = max(1, (len(packs) + per - 1) // per)
+    pp = min(max(pp, 0), total - 1)
+    rows = []
+    if pp == 0 and svc["tok_min"] > 0:
+        rows.append([B("🪙 شحن توكنز بالكمية", f"tok:{svc['id']}")])
+    for p in packs[pp * per:(pp + 1) * per]:
+        price = await pack_sell_price(p, section)
+        rows.append([B(f"{p['label']} ⬅ {price:,} ل.س", f"pb:{p['id']}")])
+    nav = []
+    if pp > 0:
+        nav.append(B("⬅️ السابق", f"cv:{svc['id']}:{lp}:{pp - 1}"))
+    if pp < total - 1:
+        nav.append(B("التالي ➡️", f"cv:{svc['id']}:{lp}:{pp + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([B("🔙 رجوع", back)])
+    await safe_edit(cb, f"{svc_emoji(svc)} <b>{esc(svc['name'])}</b>\nاختر الباقة (صفحة {pp + 1} من {total}):{notes}", KB(rows))
+
+
+@dp.callback_query(F.data.startswith("pb:"))
+async def pack_buy(cb: types.CallbackQuery, state: FSMContext):
+    pid = int(cb.data.split(":")[1])
+    row = await fetch_one(
+        "SELECT p.id AS pid, p.label, p.price, p.cur, p.is_hidden AS phid, s.id AS sid, s.section, s.platform, "
+        "s.name, s.emoji, s.ask, s.notes, s.is_hidden AS shid "
+        "FROM catalog_packs p JOIN catalog_services s ON s.id=p.service_id WHERE p.id=?", (pid,)
+    )
+    if not row or row["phid"] or row["shid"]:
+        await cb.answer("⚠️ هذه الباقة لم تعد متاحة.", show_alert=True)
+        return
+    section = row["section"]
+    price = await pack_sell_price(row, section)  # السعر من الخادم دائماً
+    service_name = order_service_name(row, row["label"])
+    await state.clear()
+    await state.update_data(g_dept=SECTIONS[section]["dept"], g_service=service_name, g_price=price)
     await state.set_state(GlobalOrderState.input_data)
+    notes = f"\n\n📌 {esc(row['notes'])}" if row.get("notes") else ""
+    back = "cs:numbers:0" if section == "numbers" else f"cv:{row['sid']}:0:0"
     await safe_edit(
         cb,
-        f"{game['emoji']} لقد اخترت: <b>{esc(game['name'])} - {esc(label)}</b> ({price:,} ل.س)\n\n{esc(game['ask'])}",
-        cancel_kb(f"gm:{g_key}:0"),
+        f"{svc_emoji(row)} لقد اخترت: <b>{esc(service_name)}</b> ({price:,} ل.س){notes}\n\n{esc(row['ask'] or 'أرسل البيانات المطلوبة:')}",
+        cancel_kb(back),
     )
 
 
-@dp.callback_query(F.data.startswith("gtok:"))
-async def game_tokens_start(cb: types.CallbackQuery, state: FSMContext):
-    g_key = cb.data.split(":")[1]
-    game = GAMES_CATALOG[g_key]
-    tk = game["tokens"]
+@dp.callback_query(F.data.startswith("tok:"))
+async def tokens_start(cb: types.CallbackQuery, state: FSMContext):
+    svc = await get_service(int(cb.data.split(":")[1]))
+    if not svc or svc["is_hidden"] or svc["tok_min"] <= 0:
+        await cb.answer("⚠️ غير متاح.", show_alert=True)
+        return
     await state.clear()
-    await state.update_data(tok_game=g_key)
+    await state.update_data(tok_sid=svc["id"])
     await state.set_state(GameTokens.entering)
-    unit = await sell_price(cost_syp=tk["unit_syp"] * 1000) / 1000
+    unit = (await sell_price(cost_syp=svc["tok_unit"] * 1000, section=svc["section"])) / 1000
     await safe_edit(
         cb,
-        f"🪙 <b>شحن توكنز {esc(game['name'])}</b>\n"
-        f"الحد الأدنى: <b>{tk['min']:,}</b> توكن\n"
+        f"🪙 <b>شحن توكنز {esc(svc['name'])}</b>\n"
+        f"الحد الأدنى: <b>{svc['tok_min']:,}</b> توكن\n"
         f"السعر التقريبي: <b>{unit:.3f} ل.س</b> للتوكن\n\n"
-        f"أرسل الآيدي ثم الكمية وبينهما مسافة:\nمثال: <code>123456 10000</code>",
-        cancel_kb(f"gm:{g_key}:0"),
+        f"أرسل الآيدي ثم الكمية وبينهما مسافة:\nمثال: <code>123456 {svc['tok_min']}</code>",
+        cancel_kb(f"cv:{svc['id']}:0:0"),
     )
 
 
 @dp.message(GameTokens.entering)
-async def game_tokens_receive(message: types.Message, state: FSMContext):
+async def tokens_receive(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    game = GAMES_CATALOG.get(data.get("tok_game", ""))
-    if not game or not game.get("tokens"):
+    svc = await get_service(int(data["tok_sid"])) if data.get("tok_sid") else None
+    if not svc or svc["is_hidden"] or svc["tok_min"] <= 0:
         await state.clear()
         await message.answer("⚠️ انتهت الجلسة، يرجى الاختيار من جديد.", reply_markup=HOME_KB)
         return
-    tk = game["tokens"]
     parts = txt(message).split()
     qty = to_int(parts[1]) if len(parts) >= 2 else None
     if qty is None:
         await message.reply("⚠️ أرسل الآيدي ثم الكمية (رقم صحيح) وبينهما مسافة:")
         return
-    if qty < tk["min"]:
-        await message.reply(f"⚠️ الحد الأدنى للكمية {tk['min']:,} توكن:")
+    if qty < svc["tok_min"]:
+        await message.reply(f"⚠️ الحد الأدنى للكمية {svc['tok_min']:,} توكن:")
         return
     if qty > 100_000_000:
         await message.reply("⚠️ الكمية غير صالحة:")
         return
-    price = await sell_price(cost_syp=qty * tk["unit_syp"])
+    price = await sell_price(cost_syp=qty * svc["tok_unit"], section=svc["section"])
     await process_wallet_purchase(
-        message, message.from_user.id, "games", f"{game['name']} - توكنز ({qty:,})",
+        message, message.from_user.id, SECTIONS[svc["section"]]["dept"], f"{svc['name']} - توكنز ({qty:,})",
         f"الآيدي: {parts[0][:100]}", price, state,
     )
+
+
+@dp.message(ChatInput.entering_data)
+async def qty_receive(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    svc = await get_service(int(data["c_sid"])) if data.get("c_sid") else None
+    if not svc or svc["kind"] != "qty" or svc["is_hidden"]:
+        await state.clear()
+        await message.answer("⚠️ انتهت الجلسة، يرجى الاختيار من جديد.", reply_markup=KB([[B("💬 قائمة التطبيقات", "sec:chat")]]))
+        return
+    parts = txt(message).split()
+    qty = to_int(parts[1]) if len(parts) >= 2 else None
+    if qty is None:
+        await message.reply("⚠️ أرسل الآيدي ثم الكمية (رقم صحيح) وبينهما مسافة:")
+        return
+    min_q = max(1, svc["min_qty"])
+    if qty < min_q:
+        await message.reply(f"⚠️ الحد الأدنى للكمية في {esc(svc['name'])} هو {min_q:,}:")
+        return
+    if qty > 10_000_000_000:
+        await message.reply("⚠️ الكمية غير صالحة:")
+        return
+    price = await sell_price(cost_syp=qty_cost(svc, qty), section=svc["section"])
+    await process_wallet_purchase(
+        message, message.from_user.id, SECTIONS[svc["section"]]["dept"], f"{svc['name']} ({qty:,})",
+        f"الآيدي: {parts[0][:100]}", price, state,
+    )
+
+
+def norm_name(s: str) -> str:
+    return re.sub(r"[\s\-_.]+", "", normalize_digits(s or "").lower())
+
+
+@dp.callback_query(F.data.startswith("cse:"))
+async def search_start(cb: types.CallbackQuery, state: FSMContext):
+    section = cb.data.split(":")[1]
+    if section != "all" and section not in SECTIONS:
+        return
+    await state.clear()
+    await state.update_data(search_section=section)
+    await state.set_state(ChatSearch.query)
+    back = "back_home" if section == "all" else f"cs:{section}:0"
+    await safe_edit(
+        cb,
+        "🔍 اكتب اسم اللعبة أو التطبيق أو الخدمة، أو <b>جزءاً من الاسم</b> (عربي أو إنجليزي):\n"
+        "مثال: <code>soul</code> أو <code>ببجي</code> أو <code>netflix</code>",
+        cancel_kb(back),
+    )
+
+
+@dp.message(ChatSearch.query)
+async def search_receive(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    section = data.get("search_section", "all")
+    q = norm_name(txt(message))
+    if len(q) < 2:
+        await message.reply("⚠️ اكتب حرفين على الأقل:")
+        return
+    services = []
+    for sec in (list(SECTIONS) if section == "all" else [section]):
+        services += await visible_services(sec)
+    found = [sv for sv in services if q in norm_name(sv["name"])]
+    if not found:  # تسامح مع الأخطاء الإملائية
+        by_name = {norm_name(sv["name"]): sv for sv in services}
+        found = [by_name[c] for c in difflib.get_close_matches(q, list(by_name), n=8, cutoff=0.6)]
+    found = found[:15]
+    back = "back_home" if section == "all" else f"cs:{section}:0"
+    if not found:
+        no_rows = []
+        if section != "all" and SECTIONS[section].get("quote"):
+            no_rows.append([B(SECTIONS[section]["quote"][1], SECTIONS[section]["quote"][0])])
+        no_rows.append([B("🔙 رجوع", back)])
+        await message.reply("لا توجد نتائج. جرّب جزءاً آخر من الاسم:", reply_markup=KB(no_rows))
+        return
+    await state.clear()
+    rows = [[B(f"{svc_emoji(sv)} {sv['name']}", f"cv:{sv['id']}:0:0")] for sv in found]
+    rows.append([B("🔍 بحث جديد", f"cse:{section}"), B("🔙 رجوع", back)])
+    await message.answer(f"🔍 نتائج البحث ({len(found)}):", reply_markup=KB(rows))
 
 
 @dp.message(GlobalOrderState.input_data)
@@ -2312,282 +2779,15 @@ CHAT_ITEMS = _build_chat_items()
 CHAT_PER_PAGE = 10
 
 
-async def chat_qty_cost(item: dict, qty: int) -> float:
-    """تكلفة الجملة: الحد الأدنى بالضبط = السعر الثابت، وما فوقه = الكمية × سعر الوحدة (بحد أدنى سعر الحد الأدنى)."""
-    if qty == item["min"]:
-        return item["min_price"]
-    return max(item["min_price"], qty * item["unit"])
-
-
-async def chat_qty_price(item: dict, qty: int) -> int:
-    # أسعار الشات بالكمية ثابتة بالليرة ولا تتبع سعر الدولار
-    return await sell_price(cost_syp=await chat_qty_cost(item, qty), section="chat")
-
-
-async def show_chat_list(cb: types.CallbackQuery, page: int):
-    total = max(1, (len(CHAT_ITEMS) + CHAT_PER_PAGE - 1) // CHAT_PER_PAGE)
-    page = min(max(page, 0), total - 1)
-    start = page * CHAT_PER_PAGE
-    buttons = [B(f"💬 {it['name']}", f"ca:{start + i}") for i, it in enumerate(CHAT_ITEMS[start:start + CHAT_PER_PAGE])]
-    rows = [[B("🔍 بحث عن تطبيق بالاسم", "chat_search")]] + rows_of(buttons, 2)
-    nav = []
-    if page > 0:
-        nav.append(B("⬅️ السابق", f"cl:{page - 1}"))
-    if page < total - 1:
-        nav.append(B("التالي ➡️", f"cl:{page + 1}"))
-    if nav:
-        rows.append(nav)
-    rows.append([B("🔍 تطبيق غير موجود [طلب تسعير]", "quote:chat")])
-    rows.append([B("🔙 العودة للرئيسية", "back_home")])
-    await safe_edit(cb, f"💬 <b>اختر تطبيق الشات المطلوب</b> (صفحة {page + 1} من {total}):", KB(rows))
-
-
-@dp.callback_query(F.data == "sec:chat")
-async def chat_menu(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await show_chat_list(cb, 0)
-
-
-@dp.callback_query(F.data.startswith("cl:"))
-async def chat_list_page(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await show_chat_list(cb, int(cb.data.split(":")[1]))
-
-
-@dp.callback_query(F.data == "chat_search")
-async def chat_search_start(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await state.set_state(ChatSearch.query)
-    await safe_edit(cb, "🔍 اكتب اسم التطبيق أو جزءاً منه (مثال: <code>soul</code>):", cancel_kb("sec:chat"))
-
-
-@dp.message(ChatSearch.query)
-async def chat_search_receive(message: types.Message, state: FSMContext):
-    q = txt(message).lower().replace(" ", "")
-    if len(q) < 2:
-        await message.reply("⚠️ اكتب حرفين على الأقل:")
-        return
-    found = [(i, it) for i, it in enumerate(CHAT_ITEMS) if q in it["name"].lower().replace(" ", "")][:12]
-    if not found:
-        await message.reply("لا توجد نتائج. جرّب اسماً آخر، أو اطلب تسعيراً للتطبيق:", reply_markup=KB([
-            [B("🔍 طلب تسعير تطبيق", "quote:chat")], [B("🔙 قائمة التطبيقات", "sec:chat")]]))
-        return
-    await state.clear()
-    rows = rows_of([B(f"💬 {it['name']}", f"ca:{i}") for i, it in found], 2)
-    rows.append([B("🔍 بحث جديد", "chat_search"), B("🔙 القائمة", "sec:chat")])
-    await message.answer(f"🔍 نتائج البحث ({len(found)}):", reply_markup=KB(rows))
-
-
-@dp.callback_query(F.data.startswith("ca:"))
-async def chat_app_view(cb: types.CallbackQuery, state: FSMContext):
-    idx = int(cb.data.split(":")[1])
-    it = CHAT_ITEMS[idx]
-    back = f"cl:{idx // CHAT_PER_PAGE}"
-    await state.clear()
-    if it["kind"] == "qty":
-        margin = await get_setting("margin_chat")
-        unit_sell = it["unit"] * (1 + margin / 100)
-        price_min = await chat_qty_price(it, it["min"])
-        await state.update_data(c_idx=idx)
-        await state.set_state(ChatInput.entering_data)
-        await safe_edit(
-            cb,
-            f"💬 <b>{esc(it['name'])}</b>\n"
-            f"────────────────────────────\n"
-            f"📉 الحد الأدنى: <b>{it['min']:,}</b> = <b>{price_min:,} ل.س</b>\n"
-            f"📈 ما فوق الحد الأدنى: <b>{unit_sell:.5f}</b> ل.س للوحدة\n"
-            f"────────────────────────────\n"
-            f"أرسل الآيدي ثم الكمية وبينهما مسافة:\nمثال: <code>123456 {it['min']}</code>",
-            cancel_kb(back),
-        )
-    else:
-        rows = []
-        for pi, (label, usd) in enumerate(it["packs"]):
-            price = await sell_price(cost_usd=usd, section="chat")
-            rows.append([B(f"{label} ⬅ {price:,} ل.س", f"cp:{idx}:{pi}")])
-        rows.append([B("🔙 رجوع", back)])
-        await safe_edit(cb, f"💬 <b>{esc(it['name'])}</b>\nاختر الباقة:", KB(rows))
-
-
-@dp.callback_query(F.data.startswith("cp:"))
-async def chat_pack_buy(cb: types.CallbackQuery, state: FSMContext):
-    _, idx_s, pi_s = cb.data.split(":")
-    it = CHAT_ITEMS[int(idx_s)]
-    label, usd = it["packs"][int(pi_s)]
-    price = await sell_price(cost_usd=usd, section="chat")  # السعر من الخادم دائماً
-    await state.clear()
-    await state.update_data(g_dept="games", g_service=f"{it['name']} - {label}", g_price=price)
-    await state.set_state(GlobalOrderState.input_data)
-    await safe_edit(cb, f"💬 لقد اخترت: <b>{esc(it['name'])} - {esc(label)}</b> ({price:,} ل.س)\n\nأرسل آيدي اللاعب:", cancel_kb(f"ca:{idx_s}"))
-
-
-@dp.message(ChatInput.entering_data)
-async def proc_chat_calc_receive(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    idx = data.get("c_idx")
-    if idx is None or not (0 <= int(idx) < len(CHAT_ITEMS)) or CHAT_ITEMS[int(idx)]["kind"] != "qty":
-        await state.clear()
-        await message.answer("⚠️ انتهت الجلسة، يرجى الاختيار من جديد.", reply_markup=KB([[B("💬 قائمة التطبيقات", "sec:chat")]]))
-        return
-    it = CHAT_ITEMS[int(idx)]
-    parts = txt(message).split()
-    qty = to_int(parts[1]) if len(parts) >= 2 else None
-    if qty is None:
-        await message.reply("⚠️ أرسل الآيدي ثم الكمية (رقم صحيح) وبينهما مسافة:")
-        return
-    if qty < it["min"]:
-        await message.reply(f"⚠️ الحد الأدنى للكمية في {esc(it['name'])} هو {it['min']:,}:")
-        return
-    if qty > 10_000_000_000:
-        await message.reply("⚠️ الكمية غير صالحة:")
-        return
-    price = await chat_qty_price(it, qty)
-    await process_wallet_purchase(
-        message, message.from_user.id, "games", f"{it['name']} ({qty:,})", f"الآيدي: {parts[0][:100]}", price, state
-    )
-
-
 # =====================================================================
 # 15. الحسابات الجاهزة
 # =====================================================================
-async def show_accounts_list(cb: types.CallbackQuery, page: int):
-    keys = list(ACCOUNTS_CATALOG.keys())
-    total = max(1, (len(keys) + ACCOUNTS_PER_PAGE - 1) // ACCOUNTS_PER_PAGE)
-    page = min(max(page, 0), total - 1)
-    chunk = keys[page * ACCOUNTS_PER_PAGE:(page + 1) * ACCOUNTS_PER_PAGE]
-    rows = rows_of([B(f"{ACCOUNTS_CATALOG[k]['emoji']} {ACCOUNTS_CATALOG[k]['name']}", f"ac:{k}") for k in chunk], 2)
-    nav = []
-    if page > 0:
-        nav.append(B("⬅️ السابق", f"al:{page - 1}"))
-    if page < total - 1:
-        nav.append(B("التالي ➡️", f"al:{page + 1}"))
-    if nav:
-        rows.append(nav)
-    rows.append([B("📋 حساب غير موجود [طلب تسعير]", "quote:acc")])
-    rows.append([B("🔙 العودة للرئيسية", "back_home")])
-    await safe_edit(cb, f"📦 <b>اختر الحساب المطلوب</b> (صفحة {page + 1} من {total}):", KB(rows))
-
-
-@dp.callback_query(F.data == "sec:accounts")
-async def accounts_home(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await show_accounts_list(cb, 0)
-
-
-@dp.callback_query(F.data.startswith("al:"))
-async def accounts_page(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await show_accounts_list(cb, int(cb.data.split(":")[1]))
-
-
-@dp.callback_query(F.data.startswith("ac:"))
-async def account_view(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    key = cb.data.split(":")[1]
-    acc = ACCOUNTS_CATALOG[key]
-    rows = []
-    for i, (label, usd) in enumerate(acc["packs"]):
-        price = await sell_price(cost_usd=usd, section="accounts")
-        rows.append([B(f"{label} ⬅ {price:,} ل.س", f"ab:{key}:{i}")])
-    rows.append([B("🔙 رجوع للحسابات", "sec:accounts")])
-    notes = f"\n\n📌 <b>ملاحظات هامة:</b>\n{esc(acc['notes'])}" if acc.get("notes") else ""
-    await safe_edit(cb, f"{acc['emoji']} <b>{esc(acc['name'])}</b>\nاختر الباقة:{notes}", KB(rows))
-
-
-@dp.callback_query(F.data.startswith("ab:"))
-async def account_buy(cb: types.CallbackQuery, state: FSMContext):
-    _, key, idx = cb.data.split(":")
-    acc = ACCOUNTS_CATALOG[key]
-    label, usd = acc["packs"][int(idx)]
-    price = await sell_price(cost_usd=usd, section="accounts")  # السعر من الخادم دائماً
-    await state.clear()
-    await state.update_data(g_dept="accounts", g_service=f"{acc['name']} - {label}", g_price=price)
-    await state.set_state(GlobalOrderState.input_data)
-    notes = f"\n\n📌 {esc(acc['notes'])}" if acc.get("notes") else ""
-    await safe_edit(
-        cb,
-        f"{acc['emoji']} لقد اخترت: <b>{esc(acc['name'])} - {esc(label)}</b> ({price:,} ل.س){notes}\n\n{esc(acc['ask'])}",
-        cancel_kb(f"ac:{key}"),
-    )
-
-
 # =====================================================================
 # 16. السوشيال ميديا والإعلانات
 # =====================================================================
-@dp.callback_query(F.data == "sec:social")
-async def social_menu(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    rows = [[B(f"{emo} خدمات {name}", f"sp:{k}")] for k, (emo, name) in SOCIAL_PLATFORMS.items()]
-    rows.append([B("🔙 العودة للرئيسية", "back_home")])
-    await safe_edit(cb, "🚀 <b>اختر منصة السوشيال ميديا:</b>", KB(rows))
-
-
-@dp.callback_query(F.data.startswith("sp:"))
-async def social_platform(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    plat = cb.data.split(":")[1]
-    emo, name = SOCIAL_PLATFORMS[plat]
-    rows = [[B(sv["name"], f"ss:{k}")] for k, sv in SOCIAL_SERVICES.items() if sv["plat"] == plat]
-    rows.append([B("🔙 رجوع", "sec:social")])
-    await safe_edit(cb, f"{emo} <b>خدمات {name}:</b>\nاختر الخدمة:", KB(rows))
-
-
-@dp.callback_query(F.data.startswith("ss:"))
-async def social_service(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    key = cb.data.split(":")[1]
-    sv = SOCIAL_SERVICES[key]
-    rows = []
-    for i, (label, usd) in enumerate(sv["packs"]):
-        price = await sell_price(cost_usd=usd, section="social")
-        rows.append([B(f"{label} ⬅ {price:,} ل.س", f"sb:{key}:{i}")])
-    rows.append([B("🔙 رجوع", f"sp:{sv['plat']}")])
-    await safe_edit(cb, f"🚀 <b>{esc(sv['name'])}</b>\nاختر الباقة:", KB(rows))
-
-
-@dp.callback_query(F.data.startswith("sb:"))
-async def social_buy(cb: types.CallbackQuery, state: FSMContext):
-    _, key, idx = cb.data.split(":")
-    sv = SOCIAL_SERVICES[key]
-    label, usd = sv["packs"][int(idx)]
-    price = await sell_price(cost_usd=usd, section="social")  # السعر من الخادم دائماً
-    emo, pname = SOCIAL_PLATFORMS[sv["plat"]]
-    await state.clear()
-    await state.update_data(g_dept="social", g_service=f"{pname} - {sv['name']} ({label})", g_price=price)
-    await state.set_state(GlobalOrderState.input_data)
-    await safe_edit(
-        cb,
-        f"{emo} لقد اخترت: <b>{esc(sv['name'])} - {esc(label)}</b> ({price:,} ل.س)\n\n{esc(sv['ask'])}",
-        cancel_kb(f"ss:{key}"),
-    )
-
-
 # =====================================================================
 # 17. أرقام التفعيل
 # =====================================================================
-@dp.callback_query(F.data == "sec:numbers")
-async def numbers_home(cb: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    rows = []
-    for k, n in NUMBERS_CATALOG.items():
-        price = await sell_price(cost_usd=n["usd"], section="numbers")
-        rows.append([B(f"{n['emoji']} {n['name']} ({price:,} ل.س)", f"nb:{k}")])
-    rows.append([B("🌐 تفعيل غوغل / خدمة أخرى [طلب تسعير]", "quote:num_google")])
-    rows.append([B("🔙 العودة للرئيسية", "back_home")])
-    await safe_edit(cb, "📱 <b>قسم أرقام التفعيل:</b>", KB(rows))
-
-
-@dp.callback_query(F.data.startswith("nb:"))
-async def number_buy(cb: types.CallbackQuery, state: FSMContext):
-    key = cb.data.split(":")[1]
-    n = NUMBERS_CATALOG[key]
-    price = await sell_price(cost_usd=n["usd"], section="numbers")  # السعر من الخادم دائماً
-    await state.clear()
-    await state.update_data(g_dept="social", g_service=n["name"], g_price=price)
-    await state.set_state(GlobalOrderState.input_data)
-    await safe_edit(cb, f"{n['emoji']} لقد اخترت: <b>{esc(n['name'])}</b> ({price:,} ل.س)\n\n{esc(n['ask'])}", cancel_kb("sec:numbers"))
-
-
 # =====================================================================
 # 18. طلبات التسعير والدعم الفني
 # =====================================================================
@@ -2713,6 +2913,10 @@ async def handle_admin_payment_action(cb: types.CallbackQuery):
             )
         except Exception as e:
             log.warning("notify customer failed: %s", e)
+        try:
+            await referral_after_completion(u_id)
+        except Exception as e:
+            log.error("referral hook failed: %s", e)
         await append_status(cb.message, f"🟢 <b>تم قبول الإيداع ({amt:,} ل.س)</b>")
     else:
         u_id = await WalletService.decline_payment(pay_id)
@@ -2771,6 +2975,231 @@ async def admin_group_direct_reply(message: types.Message):
             await message.reply(f"⚠️ فشل تسليم الرسالة: {esc(str(e2))}")
     except Exception as e:
         await message.reply(f"⚠️ فشل تسليم الرسالة: {esc(str(e))}")
+
+
+# =====================================================================
+# 19ب. نظام الإحالة (مشروط بأول عملية شراء منفذة + مراجعة المشرف)
+# =====================================================================
+_bot_username: Optional[str] = None
+
+
+async def get_bot_username() -> str:
+    global _bot_username
+    if not _bot_username:
+        _bot_username = (await bot.me()).username
+    return _bot_username
+
+
+async def register_referral(new_user_id: int, referrer_id: int) -> bool:
+    """يربط المدعو بصاحب الدعوة. شروط: صاحب الدعوة مشترك في البرنامج، لا إحالة للنفس،
+    والمدعو لم يشحن ولم يشترِ من قبل ولا إحالة سابقة له."""
+    if new_user_id == referrer_id:
+        return False
+    try:
+        async with write_tx() as db:
+            cur = await db.execute("SELECT ref_enrolled FROM users WHERE user_id=?", (referrer_id,))
+            r = await cur.fetchone()
+            if not r or not r[0]:
+                return False
+            cur = await db.execute("SELECT 1 FROM referrals WHERE referred_id=?", (new_user_id,))
+            if await cur.fetchone():
+                return False
+            cur = await db.execute("SELECT 1 FROM orders WHERE user_id=? LIMIT 1", (new_user_id,))
+            if await cur.fetchone():
+                return False
+            cur = await db.execute("SELECT 1 FROM payments WHERE user_id=? AND status='ACCEPTED' LIMIT 1", (new_user_id,))
+            if await cur.fetchone():
+                return False
+            await db.execute("INSERT INTO referrals (referred_id, referrer_id) VALUES (?, ?)", (new_user_id, referrer_id))
+            await db.execute("UPDATE users SET referred_by=? WHERE user_id=?", (referrer_id, new_user_id))
+            return True
+    except Exception as e:
+        log.error("register_referral error: %s", e)
+        return False
+
+
+async def compute_reward(db, referrer_id: int, batch_no: int) -> int:
+    """قيمة المكافأة: إن حُدّدت نسبة % فهي من مجموع أول شحن مؤكد لكل صديق في الدفعة، وإلا القيمة الثابتة."""
+    cur = await db.execute("SELECT key, val FROM settings WHERE key IN ('referral_reward', 'referral_percent')")
+    st = {k: v for k, v in await cur.fetchall()}
+    pct = float(st.get("referral_percent") or 0)
+    fixed = int(st.get("referral_reward") or 0)
+    if pct <= 0:
+        return fixed
+    cur = await db.execute(
+        "SELECT referred_id FROM referrals WHERE referrer_id=? AND status='COMPLETED' "
+        "ORDER BY completed_at, referred_id LIMIT ? OFFSET ?",
+        (referrer_id, REFERRAL_TARGET, (batch_no - 1) * REFERRAL_TARGET),
+    )
+    ids = [r[0] for r in await cur.fetchall()]
+    total = 0
+    for rid in ids:
+        c = await db.execute(
+            "SELECT amount FROM payments WHERE user_id=? AND status='ACCEPTED' ORDER BY created_at, rowid LIMIT 1", (rid,)
+        )
+        row = await c.fetchone()
+        total += row[0] if row else 0
+    return int(total * pct / 100)
+
+
+async def referral_mark_completed(user_id: int):
+    """تُستدعى فور تأكيد أول إيداع للمدعو. ترجع (referrer_id، عدد المكتملة، reward_id أو None، المبلغ) أو None."""
+    async with write_tx() as db:
+        cur = await db.execute("SELECT referrer_id FROM referrals WHERE referred_id=? AND status='PENDING'", (user_id,))
+        r = await cur.fetchone()
+        if not r:
+            return None
+        referrer = r[0]
+        await db.execute(
+            "UPDATE referrals SET status='COMPLETED', completed_at=CURRENT_TIMESTAMP WHERE referred_id=? AND status='PENDING'",
+            (user_id,),
+        )
+        cur = await db.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND status='COMPLETED'", (referrer,))
+        n = (await cur.fetchone())[0]
+        reward_id, amount = None, 0
+        if n > 0 and n % REFERRAL_TARGET == 0:
+            batch = n // REFERRAL_TARGET
+            amount = await compute_reward(db, referrer, batch)
+            cur = await db.execute(
+                "INSERT OR IGNORE INTO referral_rewards (referrer_id, batch_no, amount) VALUES (?, ?, ?)",
+                (referrer, batch, amount),
+            )
+            if cur.rowcount:
+                reward_id = cur.lastrowid
+        return referrer, n, reward_id, amount
+
+
+async def referral_decide_reward(rid: int, approve: bool) -> Tuple[str, int, int]:
+    """يرجع (الحالة، user_id، المبلغ): OK | DONE (عولجت مسبقاً) | NO_AMOUNT | ERROR."""
+    try:
+        async with write_tx() as db:
+            cur = await db.execute("SELECT referrer_id, batch_no, amount, status FROM referral_rewards WHERE id=?", (rid,))
+            row = await cur.fetchone()
+            if not row or row[3] != "PENDING":
+                return "DONE", 0, 0
+            uid, batch, amount, _ = row
+            if not approve:
+                await db.execute("UPDATE referral_rewards SET status='REJECTED', decided_at=CURRENT_TIMESTAMP WHERE id=?", (rid,))
+                return "OK", uid, 0
+            if amount <= 0:  # لم تكن القيمة محددة عند الإنشاء: نحسبها بالإعدادات الحالية
+                amount = await compute_reward(db, uid, batch)
+            if amount <= 0:
+                return "NO_AMOUNT", 0, 0
+            await db.execute(
+                "UPDATE referral_rewards SET status='PAID', amount=?, decided_at=CURRENT_TIMESTAMP WHERE id=?", (amount, rid)
+            )
+            nb = await WalletService._credit(db, uid, amount, f"REFRW-{rid}", "REFERRAL", "مكافأة إحالة")
+            if nb is None:
+                raise RuntimeError("referrer missing")
+            return "OK", uid, amount
+    except Exception as e:
+        log.error("referral_decide_reward error: %s", e)
+        return "ERROR", 0, 0
+
+
+async def referral_after_completion(user_id: int):
+    """إشعارات بعد أول شحن مؤكد للمدعو: تقدّم صاحب الدعوة، وطلب صرف المكافأة لمجموعة المراجعة."""
+    res = await referral_mark_completed(user_id)
+    if not res:
+        return
+    referrer, n, reward_id, amount = res
+    done_in_batch = n % REFERRAL_TARGET or REFERRAL_TARGET
+    try:
+        await bot.send_message(
+            referrer,
+            f"🎁 <b>إحالة جديدة مكتملة!</b>\nقام أحد أصدقائك بشحن محفظته.\n"
+            f"تقدّمك: <b>{done_in_batch} / {REFERRAL_TARGET}</b>",
+        )
+    except Exception:
+        pass
+    if reward_id:
+        u = await WalletService.get_or_create_user(referrer)
+        warn = "" if amount > 0 else "\n⚠️ لم تُحدَّد قيمة المكافأة بعد — حدّدها من لوحة المدير (🎁 الإحالة) ثم اضغط صرف."
+        text = (
+            f"🎁 <b>طلب صرف مكافأة إحالة</b>\n"
+            f"👤 الزبون: {('@' + esc(u[1])) if u[1] else 'بدون'} (<code>{referrer}</code>)\n"
+            f"🔑 UID: <code>{referrer}</code>\n"
+            f"📛 الاسم: {esc(u[6] or '—')}\n"
+            f"✅ إحالات مكتملة: <b>{n}</b> (الدفعة رقم {n // REFERRAL_TARGET})\n"
+            f"💰 قيمة المكافأة: <b>{amount:,} ل.س</b>{warn}"
+        )
+        kb = KB([[B("✅ صرف المكافأة", f"ref_rw:ok:{reward_id}"), B("❌ رفض", f"ref_rw:no:{reward_id}")]])
+        await send_to_staff(REFERRAL_ADMIN_GROUP, text, kb)
+
+
+async def referral_screen(uid: int):
+    async with get_db() as db:
+        cur = await db.execute("SELECT ref_enrolled FROM users WHERE user_id=?", (uid,))
+        r = await cur.fetchone()
+        enrolled = bool(r and r[0])
+        cur = await db.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND status='COMPLETED'", (uid,))
+        done = (await cur.fetchone())[0]
+        cur = await db.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND status='PENDING'", (uid,))
+        pending = (await cur.fetchone())[0]
+    if not enrolled:
+        text = (
+            "🎁 <b>شارك واربح</b>\n────────────────────────────\n"
+            f"ادعُ أصدقاءك عبر رابطك الخاص. وعندما يقوم <b>{REFERRAL_TARGET} أشخاص</b> منهم بشحن محفظتهم "
+            "داخل البوت (بعد تأكيد الإيداع) تحصل على مكافأة في محفظتك.\n\n"
+            "• لا تُحتسب الإحالة بمجرد الدخول أو الاشتراك بالقناة أو التصفح، بل فور أول شحن مؤكد للمحفظة.\n"
+            "• الاشتراك في البرنامج اختياري."
+        )
+        kb = KB([[B("✅ اشترك في برنامج الإحالة", "ref:join")], [B("🔙 الرئيسية", "back_home")]])
+    else:
+        link = f"https://t.me/{await get_bot_username()}?start=ref_{uid}"
+        in_batch = done % REFERRAL_TARGET
+        text = (
+            "🎁 <b>شارك واربح</b>\n────────────────────────────\n"
+            f"🔗 رابط دعوتك:\n<code>{link}</code>\n\n"
+            f"✅ إحالات مكتملة: <b>{done}</b>\n"
+            f"⏳ بانتظار أول شحن: <b>{pending}</b>\n"
+            f"📈 تقدّمك نحو المكافأة القادمة: <b>{in_batch} / {REFERRAL_TARGET}</b>\n"
+            "\nانسخ الرابط وأرسله لأصدقائك."
+        )
+        kb = KB([[B("🔄 تحديث", "ref:home")], [B("🔙 الرئيسية", "back_home")]])
+    return text, kb
+
+
+@dp.callback_query(F.data == "ref:home")
+async def ref_home(cb: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    text, kb = await referral_screen(cb.from_user.id)
+    await safe_edit(cb, text, kb)
+
+
+@dp.callback_query(F.data == "ref:join")
+async def ref_join(cb: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await WalletService.get_or_create_user(cb.from_user.id, cb.from_user.username or "", cb.from_user.full_name or "")
+    await exec_sql("UPDATE users SET ref_enrolled=1 WHERE user_id=?", (cb.from_user.id,))
+    text, kb = await referral_screen(cb.from_user.id)
+    await safe_edit(cb, text, kb)
+
+
+@dp.callback_query(F.data.startswith("ref_rw:"))
+async def ref_reward_action(cb: types.CallbackQuery):
+    if not in_staff_group(cb):
+        await cb.answer("⛔ غير مصرح.", show_alert=True)
+        return
+    _, act, rid_s = cb.data.split(":")
+    status, uid, amount = await referral_decide_reward(int(rid_s), act == "ok")
+    if status == "NO_AMOUNT":
+        await cb.answer("⚠️ حدّد قيمة المكافأة أولاً من لوحة المدير (🎁 الإحالة).", show_alert=True)
+        return
+    if status == "DONE":
+        await cb.answer("⚠️ تمت معالجة هذا الطلب مسبقاً!", show_alert=True)
+        return
+    if status != "OK":
+        await cb.answer("⚠️ حدث خطأ، حاول مجدداً.", show_alert=True)
+        return
+    try:
+        if act == "ok":
+            await bot.send_message(uid, f"🎉 <b>تهانينا!</b> أكملت {REFERRAL_TARGET} إحالات ناجحة، وتمت إضافة <b>{amount:,} ل.س</b> إلى محفظتك كمكافأة.")
+        else:
+            await bot.send_message(uid, "ℹ️ تمت مراجعة طلب مكافأة الإحالة ولم تتم الموافقة عليه. للاستفسار تواصل مع الدعم.")
+    except Exception as e:
+        log.warning("notify referrer failed: %s", e)
+    await append_status(cb.message, f"🟢 <b>تم صرف المكافأة ({amount:,} ل.س)</b>" if act == "ok" else "🔴 <b>تم رفض المكافأة</b>")
 
 
 # =====================================================================
@@ -3147,6 +3576,552 @@ async def adm_set_rate_rec(message: types.Message, state: FSMContext):
     await message.reply(f"✅ تم تحديث سعر صرف الدولار إلى: <b>{val:,.2f} ل.س</b>\nالأسعار المبنية على الدولار تتبعه فوراً، أما ما سعره بالليرة (الشات بالكمية، الرصيد والكاش) فيبقى ثابتاً.")
 
 
+# ---------------- إدارة الخدمات (الكتالوج) ----------------
+def cur_sym(cur: str) -> str:
+    return "$" if cur == "USD" else "ل.س"
+
+
+def parse_price(s: str):
+    """رقم مع $ = دولار، وبدونها = ليرة سورية. يرجع (السعر, العملة) أو None."""
+    s = s.strip().replace("٫", ".").replace("،", ",")
+    usd = "$" in s
+    s = s.replace("$", "").replace(",", "").strip()
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    if v != v or v <= 0 or v > 1e9:
+        return None
+    return v, ("USD" if usd else "SYP")
+
+
+def parse_pack_lines(text: str):
+    """كل سطر: الاسم = السعر. يرجع (القائمة, الأسطر الخاطئة)."""
+    good, bad = [], []
+    for line in text.splitlines():
+        line = line.strip().lstrip("*•-– ").strip()
+        if not line:
+            continue
+        label, sep, price = line.rpartition("=")
+        pr = parse_price(price) if sep else None
+        label = label.strip()
+        if not label or len(label) > 80 or pr is None:
+            bad.append(line)
+        else:
+            good.append((label, pr[0], pr[1]))
+    return good, bad
+
+
+async def service_card(sid: int):
+    s = await get_service(sid)
+    if not s:
+        return None, None
+    packs = await fetch_all("SELECT * FROM catalog_packs WHERE service_id=? ORDER BY id", (sid,))
+    sec = SECTIONS[s["section"]]
+    plat = f" | المنصة: {SOCIAL_PLATFORMS[s['platform']][1]}" if s["platform"] in SOCIAL_PLATFORMS else ""
+    lines = [
+        f"🗂 <b>{esc(s['name'])}</b>",
+        f"القسم: {sec['label']}{plat}",
+        f"الحالة: {'🙈 مخفية عن الزبائن' if s['is_hidden'] else '👁 ظاهرة'}",
+        f"النوع: {'بالكمية' if s['kind'] == 'qty' else 'فئات ثابتة'}",
+        f"نص الطلب: {esc(s['ask'] or '—')}",
+    ]
+    if s["notes"]:
+        lines.append(f"الملاحظات: {esc(s['notes'])}")
+    if s["kind"] == "qty":
+        lines.append(f"📉 الحد الأدنى: {s['min_qty']:,} = {fmt_num(s['min_price'])} ل.س | 📈 الوحدة بعده: {fmt_num(s['unit_price'])} ل.س")
+    else:
+        lines.append(f"عدد الفئات: {len(packs)}" + ("  ⚠️ لا فئات: الخدمة لا تظهر للزبائن" if not packs else ""))
+    if s["tok_min"]:
+        lines.append(f"🪙 توكنز: الحد الأدنى {s['tok_min']:,} | سعر التوكن {fmt_num(s['tok_unit'])} ل.س")
+    rows = []
+    for p in packs:
+        mark = "🙈 " if p["is_hidden"] else ""
+        rows.append([B(f"{mark}{p['label']} — {fmt_num(p['price'])}{cur_sym(p['cur'])}", f"adm:pk:{p['id']}")])
+    if s["kind"] == "packs":
+        rows.append([B("➕ إضافة فئات", f"adm:pa:{sid}")])
+    else:
+        rows.append([B("✏️ الحد الأدنى والأسعار", f"adm:ed:s:{sid}:qty")])
+    if s["tok_min"]:
+        rows.append([B("🪙 تعديل التوكنز", f"adm:ed:s:{sid}:tok")])
+    rows.append([B("✏️ الاسم", f"adm:ed:s:{sid}:name"), B("✏️ نص الطلب", f"adm:ed:s:{sid}:ask")])
+    rows.append([B("✏️ الملاحظات", f"adm:ed:s:{sid}:notes")])
+    rows.append([B("👁 إظهار" if s["is_hidden"] else "🙈 إخفاء", f"adm:hd:s:{sid}"), B("🗑 حذف الخدمة", f"adm:dl:s:{sid}")])
+    rows.append([B("🔙 القسم", f"adm:cs:{s['section']}:0")])
+    return "\n".join(lines), KB(rows)
+
+
+async def pack_card(pid: int):
+    p = await fetch_one("SELECT * FROM catalog_packs WHERE id=?", (pid,))
+    if not p:
+        return None, None
+    s = await get_service(p["service_id"])
+    text = (
+        f"💠 <b>{esc(p['label'])}</b>\n"
+        f"الخدمة: {esc(s['name'] if s else '—')}\n"
+        f"💰 سعر الجملة: <b>{fmt_num(p['price'])} {cur_sym(p['cur'])}</b> ({'دولار' if p['cur'] == 'USD' else 'ليرة سورية'})\n"
+        f"الحالة: {'🙈 مخفية' if p['is_hidden'] else '👁 ظاهرة'}"
+    )
+    kb = KB([
+        [B("✏️ السعر", f"adm:ed:p:{pid}:price"), B("✏️ الاسم", f"adm:ed:p:{pid}:label")],
+        [B("👁 إظهار" if p["is_hidden"] else "🙈 إخفاء", f"adm:hd:p:{pid}"), B("🗑 حذف", f"adm:dl:p:{pid}")],
+        [B("🔙 الخدمة", f"adm:sv:{p['service_id']}")],
+    ])
+    return text, kb
+
+
+@dp.callback_query(F.data == "adm:cat")
+async def adm_cat_menu(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin_cb(cb):
+        return
+    await state.clear()
+    rows = []
+    for k, meta in SECTIONS.items():
+        r = await fetch_one("SELECT COUNT(*) AS n, COALESCE(SUM(is_hidden),0) AS h FROM catalog_services WHERE section=?", (k,))
+        rows.append([B(f"{meta['emoji']} {meta['label']} ({r['n']})", f"adm:cs:{k}:0")])
+    rows.append([B("🔙 رجوع", "adm:home")])
+    await safe_edit(cb, "🗂 <b>إدارة الخدمات</b>\nاختر القسم:", KB(rows))
+
+
+@dp.callback_query(F.data.startswith("adm:cs:"))
+async def adm_cat_section(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin_cb(cb):
+        return
+    await state.clear()
+    _, _, section, page_s = cb.data.split(":")
+    if section not in SECTIONS:
+        return
+    items = await fetch_all(
+        "SELECT * FROM catalog_services WHERE section=? ORDER BY " + ("lower(name)" if section == "chat" else "id"), (section,)
+    )
+    per = 8
+    total = max(1, (len(items) + per - 1) // per)
+    page = min(max(int(page_s), 0), total - 1)
+    chunk = items[page * per:(page + 1) * per]
+    rows = [[B("➕ إضافة خدمة جديدة", f"adm:csa:{section}")]]
+    rows += rows_of([B(("🙈 " if s["is_hidden"] else "") + s["name"], f"adm:sv:{s['id']}") for s in chunk], 1)
+    nav = []
+    if page > 0:
+        nav.append(B("⬅️ السابق", f"adm:cs:{section}:{page - 1}"))
+    if page < total - 1:
+        nav.append(B("التالي ➡️", f"adm:cs:{section}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([B("🔙 الأقسام", "adm:cat")])
+    meta = SECTIONS[section]
+    await safe_edit(cb, f"{meta['emoji']} <b>{meta['label']}</b> — {len(items)} خدمة (صفحة {page + 1} من {total})", KB(rows))
+
+
+@dp.callback_query(F.data.startswith("adm:sv:"))
+async def adm_service_card(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin_cb(cb):
+        return
+    await state.clear()
+    text, kb = await service_card(int(cb.data.split(":")[2]))
+    if not text:
+        await cb.answer("⚠️ الخدمة غير موجودة.", show_alert=True)
+        return
+    await safe_edit(cb, text, kb)
+
+
+@dp.callback_query(F.data.startswith("adm:pk:"))
+async def adm_pack_card(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin_cb(cb):
+        return
+    await state.clear()
+    text, kb = await pack_card(int(cb.data.split(":")[2]))
+    if not text:
+        await cb.answer("⚠️ الفئة غير موجودة.", show_alert=True)
+        return
+    await safe_edit(cb, text, kb)
+
+
+@dp.callback_query(F.data.startswith("adm:hd:"))
+async def adm_toggle_hidden(cb: types.CallbackQuery):
+    if not is_admin_cb(cb):
+        return
+    _, _, kind, id_s = cb.data.split(":")
+    table = "catalog_services" if kind == "s" else "catalog_packs"
+    await exec_sql(f"UPDATE {table} SET is_hidden = 1 - is_hidden WHERE id=?", (int(id_s),))
+    text, kb = await (service_card(int(id_s)) if kind == "s" else pack_card(int(id_s)))
+    if text:
+        await safe_edit(cb, text, kb)
+
+
+@dp.callback_query(F.data.startswith("adm:dl:"))
+async def adm_delete_confirm(cb: types.CallbackQuery):
+    if not is_admin_cb(cb):
+        return
+    _, _, kind, id_s = cb.data.split(":")
+    if kind == "s":
+        s = await get_service(int(id_s))
+        name, back = (s["name"] if s else "—"), f"adm:sv:{id_s}"
+        extra = "\nسيُحذف معها كل فئاتها."
+    else:
+        p = await fetch_one("SELECT * FROM catalog_packs WHERE id=?", (int(id_s),))
+        name, back = (p["label"] if p else "—"), f"adm:pk:{id_s}"
+        extra = ""
+    await safe_edit(
+        cb, f"🗑 هل أنت متأكد من حذف <b>{esc(name)}</b>؟{extra}\n\nالطلبات السابقة والأرصدة لا تتأثر.",
+        KB([[B("✅ نعم، احذف", f"adm:dly:{kind}:{id_s}"), B("❌ تراجع", back)]]),
+    )
+
+
+@dp.callback_query(F.data.startswith("adm:dly:"))
+async def adm_delete_do(cb: types.CallbackQuery):
+    if not is_admin_cb(cb):
+        return
+    _, _, kind, id_s = cb.data.split(":")
+    sid = int(id_s)
+    if kind == "s":
+        s = await get_service(sid)
+        await exec_sql("DELETE FROM catalog_packs WHERE service_id=?", (sid,))
+        await exec_sql("DELETE FROM catalog_services WHERE id=?", (sid,))
+        await cb.answer("🗑 تم حذف الخدمة.", show_alert=True)
+        sec = s["section"] if s else None
+        if sec:
+            items = await fetch_all("SELECT id FROM catalog_services WHERE section=?", (sec,))
+            await safe_edit(cb, f"{SECTIONS[sec]['emoji']} تم الحذف. المتبقي في القسم: {len(items)} خدمة.",
+                            KB([[B("🔙 القسم", f"adm:cs:{sec}:0")]]))
+    else:
+        p = await fetch_one("SELECT * FROM catalog_packs WHERE id=?", (sid,))
+        await exec_sql("DELETE FROM catalog_packs WHERE id=?", (sid,))
+        await cb.answer("🗑 تم حذف الفئة.", show_alert=True)
+        if p:
+            text, kb = await service_card(p["service_id"])
+            if text:
+                await safe_edit(cb, text, kb)
+
+
+# ----- تعديل الحقول -----
+EDIT_PROMPTS = {
+    "name": "✏️ أرسل الاسم الجديد:",
+    "ask": "✏️ أرسل نص الطلب الجديد (ما يظهر للزبون عند طلب بياناته):",
+    "notes": "✏️ أرسل الملاحظات الجديدة (أو أرسل <code>-</code> لحذفها):",
+    "qty": ("✏️ أرسل ثلاثة أرقام مفصولة بمسافة:\nالحد الأدنى، سعر الحد الأدنى (ل.س)، سعر الوحدة بعده (ل.س)\n"
+            "مثال: <code>10000 155.81 0.022</code>"),
+    "tok": "✏️ أرسل رقمين: الحد الأدنى للتوكنز، سعر التوكن بالليرة.\nمثال: <code>10000 0.15</code>",
+    "price": "✏️ أرسل السعر الجديد. رقم مع <code>$</code> للدولار، وبدونها بالليرة.\nمثال: <code>1.5$</code> أو <code>2500</code>",
+    "label": "✏️ أرسل الاسم الجديد للفئة:",
+}
+
+
+@dp.callback_query(F.data.startswith("adm:ed:"))
+async def adm_edit_start(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin_cb(cb):
+        return
+    _, _, kind, id_s, field = cb.data.split(":")
+    if field not in EDIT_PROMPTS:
+        return
+    await state.clear()
+    await state.update_data(ek=kind, eid=int(id_s), field=field)
+    await state.set_state(AdminActions.cat_edit)
+    back = f"adm:sv:{id_s}" if kind == "s" else f"adm:pk:{id_s}"
+    await safe_edit(cb, EDIT_PROMPTS[field], cancel_kb(back))
+
+
+@dp.message(AdminActions.cat_edit)
+async def adm_edit_receive(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    data = await state.get_data()
+    kind, eid, field = data.get("ek"), data.get("eid"), data.get("field")
+    t = txt(message)
+    if not t or kind not in ("s", "p") or field not in EDIT_PROMPTS:
+        await message.reply("⚠️ أرسل قيمة صحيحة:")
+        return
+    if kind == "s":
+        if field in ("name", "ask", "notes"):
+            if field == "notes" and t == "-":
+                t = ""
+            limit = {"name": 80, "ask": 600, "notes": 1500}[field]
+            if len(t) > limit or (field == "name" and not t):
+                await message.reply(f"⚠️ الطول الأقصى {limit} حرفاً:")
+                return
+            await exec_sql(f"UPDATE catalog_services SET {field}=? WHERE id=?", (t, eid))
+        elif field == "qty":
+            parts = t.replace(",", "").split()
+            try:
+                mn, mp, up = int(parts[0]), float(parts[1]), float(parts[2])
+                assert mn >= 1 and mp > 0 and up > 0 and mp == mp and up == up
+            except Exception:
+                await message.reply("⚠️ الصيغة: الحد الأدنى (عدد صحيح) ثم سعر الحد الأدنى ثم سعر الوحدة، كلها أكبر من صفر:")
+                return
+            await exec_sql("UPDATE catalog_services SET min_qty=?, min_price=?, unit_price=? WHERE id=?", (mn, mp, up, eid))
+        elif field == "tok":
+            parts = t.replace(",", "").split()
+            try:
+                mn, up = int(parts[0]), float(parts[1])
+                assert mn >= 1 and up > 0 and up == up
+            except Exception:
+                await message.reply("⚠️ الصيغة: الحد الأدنى (عدد صحيح) ثم سعر التوكن، أكبر من صفر:")
+                return
+            await exec_sql("UPDATE catalog_services SET tok_min=?, tok_unit=? WHERE id=?", (mn, up, eid))
+        else:
+            await message.reply("⚠️ حقل غير صالح.")
+            return
+        await state.clear()
+        text, kb = await service_card(eid)
+    else:
+        if field == "label":
+            if len(t) > 80:
+                await message.reply("⚠️ الطول الأقصى 80 حرفاً:")
+                return
+            await exec_sql("UPDATE catalog_packs SET label=? WHERE id=?", (t, eid))
+        elif field == "price":
+            pr = parse_price(t)
+            if not pr:
+                await message.reply("⚠️ سعر غير صالح. مثال: <code>1.5$</code> أو <code>2500</code>")
+                return
+            await exec_sql("UPDATE catalog_packs SET price=?, cur=? WHERE id=?", (pr[0], pr[1], eid))
+        else:
+            await message.reply("⚠️ حقل غير صالح.")
+            return
+        await state.clear()
+        text, kb = await pack_card(eid)
+    if text:
+        await message.answer("✅ تم الحفظ.\n\n" + text, reply_markup=kb)
+    else:
+        await message.answer("✅ تم الحفظ.", reply_markup=KB([[B("🗂 إدارة الخدمات", "adm:cat")]]))
+
+
+# ----- إضافة فئات -----
+@dp.callback_query(F.data.startswith("adm:pa:"))
+async def adm_pack_add_start(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin_cb(cb):
+        return
+    sid = int(cb.data.split(":")[2])
+    await state.clear()
+    await state.update_data(sid=sid)
+    await state.set_state(AdminActions.cat_pack_add)
+    await safe_edit(
+        cb,
+        "➕ <b>إضافة فئات</b>\nأرسل كل فئة في سطر بصيغة: <code>الاسم = السعر</code>\n"
+        "رقم مع <code>$</code> للدولار، وبدونها بالليرة. ويمكنك إرسال عدة أسطر دفعة واحدة:\n\n"
+        "<code>100 جوهرة = 1.5$\n500 جوهرة = 7000</code>",
+        cancel_kb(f"adm:sv:{sid}"),
+    )
+
+
+@dp.message(AdminActions.cat_pack_add)
+async def adm_pack_add_receive(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    sid = (await state.get_data()).get("sid")
+    good, bad = parse_pack_lines(message.text or "")
+    if bad or not good:
+        await message.reply("⚠️ لم يُضف شيء. أسطر غير صالحة:\n" + "\n".join(esc(b) for b in bad[:10])
+                            if bad else "⚠️ أرسل سطراً واحداً على الأقل بصيغة: الاسم = السعر")
+        return
+    async with get_db() as db:
+        await db.executemany("INSERT INTO catalog_packs (service_id, label, price, cur) VALUES (?, ?, ?, ?)",
+                             [(sid, l, p, c) for l, p, c in good])
+    await state.clear()
+    text, kb = await service_card(sid)
+    await message.answer(f"✅ أُضيفت {len(good)} فئة.\n\n{text}", reply_markup=kb)
+
+
+# ----- إضافة خدمة جديدة -----
+DEFAULT_ASK = "أرسل آيدي اللاعب:"
+
+
+@dp.callback_query(F.data.startswith("adm:csa:"))
+async def adm_service_add_start(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin_cb(cb):
+        return
+    section = cb.data.split(":")[2]
+    if section not in SECTIONS:
+        return
+    await state.clear()
+    await state.update_data(new_section=section)
+    await state.set_state(AdminActions.cat_new_name)
+    await safe_edit(cb, f"➕ <b>خدمة جديدة في {SECTIONS[section]['label']}</b>\nأرسل اسم الخدمة:", cancel_kb(f"adm:cs:{section}:0"))
+
+
+@dp.message(AdminActions.cat_new_name)
+async def adm_service_add_name(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    name = txt(message)
+    if not name or len(name) > 80:
+        await message.reply("⚠️ أرسل اسماً (حتى 80 حرفاً):")
+        return
+    data = await state.get_data()
+    section = data.get("new_section")
+    await state.update_data(new_name=name)
+    if section == "chat":
+        await message.answer("ما نوع هذه الخدمة؟", reply_markup=KB([
+            [B("📊 بالكمية (حد أدنى + سعر وحدة)", "adm:nk:qty")],
+            [B("📦 فئات ثابتة", "adm:nk:packs")]]))
+    elif section == "social":
+        await message.answer("اختر المنصة:", reply_markup=KB(
+            [[B(f"{e} {n}", f"adm:np:{k}")] for k, (e, n) in SOCIAL_PLATFORMS.items()]))
+    else:
+        await state.set_state(AdminActions.cat_new_ask)
+        await message.answer(f"أرسل نص الطلب (ما يُطلب من الزبون)، أو <code>-</code> للنص الافتراضي:\n<i>{DEFAULT_ASK}</i>")
+
+
+@dp.callback_query(F.data.startswith("adm:nk:"))
+async def adm_service_add_kind(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin_cb(cb):
+        return
+    await state.update_data(new_kind=cb.data.split(":")[2])
+    await state.set_state(AdminActions.cat_new_ask)
+    await safe_edit(cb, f"أرسل نص الطلب (ما يُطلب من الزبون)، أو <code>-</code> للنص الافتراضي:\n<i>{DEFAULT_ASK}</i>")
+
+
+@dp.callback_query(F.data.startswith("adm:np:"))
+async def adm_service_add_platform(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin_cb(cb):
+        return
+    plat = cb.data.split(":")[2]
+    if plat not in SOCIAL_PLATFORMS:
+        return
+    await state.update_data(new_platform=plat)
+    await state.set_state(AdminActions.cat_new_ask)
+    await safe_edit(cb, "أرسل نص الطلب (مثلاً: أرسل رابط المنشور:)، أو <code>-</code> للنص الافتراضي:")
+
+
+async def _create_service(state: FSMContext, qty=None) -> int:
+    d = await state.get_data()
+    section = d["new_section"]
+    kind = d.get("new_kind", "packs")
+    ask = d.get("new_ask") or DEFAULT_ASK
+    if kind == "qty":
+        sid, _ = await exec_sql(
+            "INSERT INTO catalog_services (section, platform, name, emoji, ask, kind, min_qty, min_price, unit_price) "
+            "VALUES (?, ?, ?, ?, ?, 'qty', ?, ?, ?)",
+            (section, d.get("new_platform", ""), d["new_name"], SECTIONS[section]["emoji"], ask, qty[0], qty[1], qty[2]),
+        )
+    else:
+        sid, _ = await exec_sql(
+            "INSERT INTO catalog_services (section, platform, name, emoji, ask, kind) VALUES (?, ?, ?, ?, ?, 'packs')",
+            (section, d.get("new_platform", ""), d["new_name"], SECTIONS[section]["emoji"], ask),
+        )
+    return sid
+
+
+@dp.message(AdminActions.cat_new_ask)
+async def adm_service_add_ask(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    t = txt(message)
+    if not t or len(t) > 600:
+        await message.reply("⚠️ أرسل نصاً (حتى 600 حرف) أو - للافتراضي:")
+        return
+    await state.update_data(new_ask="" if t == "-" else t)
+    d = await state.get_data()
+    if d.get("new_kind") == "qty":
+        await state.set_state(AdminActions.cat_new_qty)
+        await message.answer(EDIT_PROMPTS["qty"])
+        return
+    sid = await _create_service(state)
+    await state.clear()
+    text, kb = await service_card(sid)
+    await message.answer("✅ أُنشئت الخدمة. أضف لها الآن فئاتها بزر «➕ إضافة فئات» (لا تظهر للزبائن قبل ذلك).\n\n" + text, reply_markup=kb)
+
+
+@dp.message(AdminActions.cat_new_qty)
+async def adm_service_add_qty(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    parts = txt(message).replace(",", "").split()
+    try:
+        mn, mp, up = int(parts[0]), float(parts[1]), float(parts[2])
+        assert mn >= 1 and mp > 0 and up > 0 and mp == mp and up == up
+    except Exception:
+        await message.reply("⚠️ الصيغة: الحد الأدنى (عدد صحيح) ثم سعر الحد الأدنى ثم سعر الوحدة، كلها أكبر من صفر:")
+        return
+    sid = await _create_service(state, qty=(mn, mp, up))
+    await state.clear()
+    text, kb = await service_card(sid)
+    await message.answer("✅ أُنشئت الخدمة وهي ظاهرة للزبائن.\n\n" + text, reply_markup=kb)
+
+
+@dp.callback_query(F.data == "adm:ref")
+async def adm_ref_panel(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin_cb(cb):
+        return
+    await state.clear()
+    async with get_db() as db:
+        async def one(sql):
+            return (await (await db.execute(sql)).fetchone())[0] or 0
+        enrolled = await one("SELECT COUNT(*) FROM users WHERE ref_enrolled=1")
+        pend = await one("SELECT COUNT(*) FROM referrals WHERE status='PENDING'")
+        done = await one("SELECT COUNT(*) FROM referrals WHERE status='COMPLETED'")
+        rw_pend = await one("SELECT COUNT(*) FROM referral_rewards WHERE status='PENDING'")
+        rw_paid = await one("SELECT COUNT(*) FROM referral_rewards WHERE status='PAID'")
+        paid_sum = await one("SELECT SUM(amount) FROM referral_rewards WHERE status='PAID'")
+    reward = int(await get_setting("referral_reward"))
+    pct = await get_setting("referral_percent")
+    mode = (f"نسبة <b>{pct:g}%</b> من مجموع أول شحن لكل صديق في الدفعة" if pct > 0
+            else f"قيمة ثابتة <b>{reward:,} ل.س</b>")
+    text = (
+        "🎁 <b>نظام الإحالة</b>\n────────────────────────────\n"
+        f"👥 المشتركون في البرنامج: <b>{enrolled:,}</b>\n"
+        f"⏳ إحالات بانتظار أول شحن: <b>{pend:,}</b>\n"
+        f"✅ إحالات مكتملة: <b>{done:,}</b>\n"
+        f"🏆 مكافآت معلقة: <b>{rw_pend:,}</b> | مصروفة: <b>{rw_paid:,}</b> ({paid_sum:,} ل.س)\n"
+        f"────────────────────────────\n"
+        f"💰 طريقة حساب المكافأة (لكل {REFERRAL_TARGET} إحالات): {mode}\n"
+        f"<i>إن وُضعت نسبة أكبر من صفر فهي تُقدَّم على القيمة الثابتة. ضع النسبة 0 للعودة إلى الثابتة.</i>"
+    )
+    await safe_edit(cb, text, KB([
+        [B("✏️ القيمة الثابتة (ل.س)", "adm:ref_set"), B("✏️ النسبة %", "adm:ref_pct")],
+        [B("🔙 رجوع", "adm:home")],
+    ]))
+
+
+@dp.callback_query(F.data == "adm:ref_set")
+async def adm_ref_set_start(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin_cb(cb):
+        return
+    await state.set_state(AdminActions.set_reward)
+    await safe_edit(cb, f"💰 أرسل قيمة المكافأة الثابتة بالليرة السورية (تُصرف لكل {REFERRAL_TARGET} إحالات مكتملة):", cancel_kb("adm:ref"))
+
+
+@dp.message(AdminActions.set_reward)
+async def adm_ref_set_rec(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    val = to_int(txt(message))
+    if val is None or val < 0 or val > 1_000_000_000:
+        await message.reply("⚠️ أدخل رقماً صحيحاً (0 أو أكبر):")
+        return
+    await update_setting("referral_reward", float(val))
+    await state.clear()
+    await message.reply(f"✅ قيمة مكافأة الإحالة الثابتة الآن: <b>{val:,} ل.س</b>")
+
+
+@dp.callback_query(F.data == "adm:ref_pct")
+async def adm_ref_pct_start(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin_cb(cb):
+        return
+    await state.set_state(AdminActions.set_reward_pct)
+    await safe_edit(
+        cb,
+        "📈 أرسل نسبة المكافأة %.\nتُحسب من <b>مجموع أول شحن مؤكد</b> لأصدقاء الدفعة (5 أصدقاء).\n"
+        "مثال: <code>10</code>. وأرسل <code>0</code> لإلغاء النسبة والعودة للقيمة الثابتة.",
+        cancel_kb("adm:ref"),
+    )
+
+
+@dp.message(AdminActions.set_reward_pct)
+async def adm_ref_pct_rec(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        val = float(normalize_digits(txt(message)).replace("%", "").replace(",", "."))
+        if not (0 <= val <= 1000) or val != val:
+            raise ValueError
+    except ValueError:
+        await message.reply("⚠️ أدخل رقماً بين 0 و 1000:")
+        return
+    await update_setting("referral_percent", val)
+    await state.clear()
+    await message.reply(f"✅ نسبة مكافأة الإحالة الآن: <b>{val:g}%</b>" + ("" if val > 0 else " (معطّلة: تُستخدم القيمة الثابتة)"))
+
+
 @dp.callback_query(F.data == "adm:margin")
 async def adm_margin_menu(cb: types.CallbackQuery, state: FSMContext):
     if not is_admin_cb(cb):
@@ -3364,15 +4339,106 @@ async def stale_callback_fallback(cb: types.CallbackQuery, state: FSMContext):
 
 
 # =====================================================================
+# النسخ الاحتياطي التلقائي إلى تلغرام (BACKUP_CHAT_ID)
+# =====================================================================
+_last_backup_mtime = 0.0
+
+
+def _db_mtime() -> float:
+    m = 0.0
+    for suffix in ("", "-wal"):
+        try:
+            m = max(m, os.path.getmtime(DB_PATH + suffix))
+        except OSError:
+            pass
+    return m
+
+
+def _make_backup_file(dest_gz: str):
+    """نسخة متسقة عبر واجهة backup في SQLite (آمنة أثناء الكتابة) + فحص سلامة + ضغط."""
+    tmp = dest_gz + ".tmp.db"
+    src = sqlite3.connect(DB_PATH, timeout=30)
+    try:
+        dst = sqlite3.connect(tmp)
+        try:
+            src.backup(dst)
+            res = dst.execute("PRAGMA integrity_check").fetchone()[0]
+        finally:
+            dst.close()
+    finally:
+        src.close()
+    if res != "ok":
+        raise RuntimeError(f"integrity_check: {res}")
+    with open(tmp, "rb") as fi, gzip.open(dest_gz, "wb", compresslevel=6) as fo:
+        shutil.copyfileobj(fi, fo)
+    os.remove(tmp)
+
+
+async def do_backup(reason: str) -> Tuple[bool, str]:
+    global _last_backup_mtime
+    if not BACKUP_CHAT_ID:
+        return False, "BACKUP_CHAT_ID غير مضبوط"
+    stamp = time.strftime("%Y-%m-%d_%H%M", time.gmtime())
+    path = os.path.join(tempfile.gettempdir(), f"syria_store_{stamp}.db.gz")
+    mtime = _db_mtime()
+    try:
+        await asyncio.to_thread(_make_backup_file, path)
+        size = os.path.getsize(path)
+        await bot.send_document(
+            BACKUP_CHAT_ID, FSInputFile(path),
+            caption=f"💾 نسخة احتياطية {stamp} UTC ({reason}) — {size / 1024:.0f} KB",
+        )
+        _last_backup_mtime = mtime
+        return True, f"{size / 1024:.0f} KB"
+    except Exception as e:
+        log.error("backup failed: %s", e)
+        return False, str(e)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+async def backup_loop():
+    await asyncio.sleep(120)
+    while True:
+        try:
+            if _db_mtime() > _last_backup_mtime:
+                ok, info = await do_backup("تلقائي")
+                if not ok:
+                    try:
+                        await bot.send_message(ADMIN_ID, f"⚠️ فشلت النسخة الاحتياطية التلقائية: {esc(info)}")
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.error("backup loop error: %s", e)
+        await asyncio.sleep(max(5, BACKUP_INTERVAL_MIN) * 60)
+
+
+@dp.callback_query(F.data == "adm:backup")
+async def adm_backup_now(cb: types.CallbackQuery):
+    if not is_admin_cb(cb):
+        return
+    await cb.answer("⏳ جارٍ إنشاء النسخة...")
+    ok, info = await do_backup("يدوي")
+    await cb.message.answer(f"✅ أُرسلت النسخة الاحتياطية ({info})." if ok else f"❌ فشلت النسخة: {esc(info)}")
+
+
+# =====================================================================
 # 22. الإقلاع
 # =====================================================================
 async def main():
     await init_db()
     await bot.delete_webhook(drop_pending_updates=False)
     log.info("🚀 Syria Store Wallet-First System is running...")
+    backup_task = asyncio.create_task(backup_loop())
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        backup_task.cancel()
         await bot.session.close()
 
 
